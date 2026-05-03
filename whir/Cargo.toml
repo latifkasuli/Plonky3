@@ -35,6 +35,7 @@ criterion.workspace = true
 p3-baby-bear = { path = "../baby-bear" }
 p3-keccak = { path = "../keccak" }
 p3-koala-bear = { path = "../koala-bear" }
+p3-zk-codes = { path = "../zk-codes" }
 proptest.workspace = true
 tracing-forest = { workspace = true, features = ["ansi", "smallvec"] }
 tracing-subscriber = { workspace = true, features = ["std", "env-filter"] }
