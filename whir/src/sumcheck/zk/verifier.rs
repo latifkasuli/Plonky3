@@ -238,6 +238,105 @@ where
             eps,
         })
     }
+
+    /// Replays the HVZK sumcheck transcript against an explicit claim.
+    ///
+    /// Code-switching has already batched the previous claim, private OOD
+    /// answers, and source openings into `mu'`, so there is no layout alpha
+    /// prelude to replay here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_claim<M, Ch>(
+        zk_data: &ZkSumcheckData<F, EF>,
+        mask_commits: &[M::Commitment],
+        ell_zk: usize,
+        folding_factor: usize,
+        pow_bits: usize,
+        claimed_sum: EF,
+        challenger: &mut Ch,
+    ) -> Result<ZkVerifierHandoff<EF>, SumcheckError>
+    where
+        M: Mmcs<F>,
+        Ch: FieldChallenger<F> + GrindingChallenger<Witness = F> + CanObserve<M::Commitment>,
+    {
+        assert!(F::TWO != F::ZERO, "Lemma 6.4 requires char(F) != 2");
+        assert!(ell_zk >= 2, "Lemma 6.4 requires ell_zk >= 2");
+        assert!(folding_factor >= 1, "sumcheck requires at least one round");
+
+        if zk_data.ell_zk != ell_zk {
+            return Err(SumcheckError::EllZkMismatch {
+                expected: ell_zk,
+                actual: zk_data.ell_zk,
+            });
+        }
+        if zk_data.round_coefficients.len() != folding_factor {
+            return Err(SumcheckError::RoundCountMismatch {
+                expected: folding_factor,
+                actual: zk_data.round_coefficients.len(),
+            });
+        }
+        if mask_commits.len() != folding_factor {
+            return Err(SumcheckError::MaskCommitmentCountMismatch {
+                expected: folding_factor,
+                actual: mask_commits.len(),
+            });
+        }
+        let expected_pow = if pow_bits > 0 { folding_factor } else { 0 };
+        if zk_data.pow_witnesses.len() != expected_pow {
+            return Err(SumcheckError::PowWitnessCountMismatch {
+                expected: expected_pow,
+                actual: zk_data.pow_witnesses.len(),
+            });
+        }
+
+        let h_size = ell_zk.max(3);
+        let wire_size = h_size - 1;
+        for (idx, wire) in zk_data.round_coefficients.iter().enumerate() {
+            if wire.len() != wire_size {
+                return Err(SumcheckError::WireSizeMismatch {
+                    round: idx + 1,
+                    expected: wire_size,
+                    actual: wire.len(),
+                });
+            }
+        }
+
+        for commit in mask_commits {
+            challenger.observe(commit.clone());
+        }
+        challenger.observe_algebra_element(EF::from(zk_data.mu_tilde));
+        let eps: EF = challenger.sample_algebra_element();
+
+        let mut target = eps * claimed_sum + zk_data.mu_tilde;
+        let mut randomness = Vec::with_capacity(folding_factor);
+        for (j_idx, wire) in zk_data.round_coefficients.iter().enumerate() {
+            let c0 = wire[0];
+            let high_sum: EF = wire[1..].iter().copied().sum();
+            let c1 = target - c0.double() - high_sum;
+
+            challenger.observe_algebra_slice(wire);
+            if pow_bits > 0 && !challenger.check_witness(pow_bits, zk_data.pow_witnesses[j_idx]) {
+                return Err(SumcheckError::InvalidPowWitness);
+            }
+
+            let gamma_j: EF = challenger.sample_algebra_element();
+            let mut coeffs = Vec::with_capacity(h_size);
+            coeffs.push(c0);
+            coeffs.push(c1);
+            coeffs.extend_from_slice(&wire[1..]);
+            target = coeffs
+                .iter()
+                .rev()
+                .copied()
+                .fold(EF::ZERO, |acc, coeff| acc * gamma_j + coeff);
+            randomness.push(gamma_j);
+        }
+
+        Ok(ZkVerifierHandoff {
+            randomness: Point::new(randomness),
+            claimed_residual: target,
+            eps,
+        })
+    }
 }
 
 #[cfg(test)]

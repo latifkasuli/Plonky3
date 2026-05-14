@@ -464,6 +464,7 @@ where
             residual_prover: SumcheckProver::new(prod_poly, residual_sum),
             randomness: rs,
             eps,
+            mask_messages: masks,
             mask_oracles,
         }
     }

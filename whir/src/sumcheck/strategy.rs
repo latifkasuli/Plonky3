@@ -378,6 +378,11 @@ impl<F: Field, EF: ExtensionField<F>> SumcheckProver<F, EF> {
         Self { poly, sum }
     }
 
+    /// Returns the current claimed sum over the remaining unbound variables.
+    pub const fn claimed_sum(&self) -> EF {
+        self.sum
+    }
+
     /// Returns the number of remaining (unbound) variables.
     pub fn num_variables(&self) -> usize {
         self.poly.num_variables()
@@ -566,6 +571,7 @@ impl<F: Field, EF: ExtensionField<F>> SumcheckProver<F, EF> {
             residual_prover: self,
             randomness: Point::new(rs),
             eps,
+            mask_messages: masks,
             mask_oracles,
         }
     }
