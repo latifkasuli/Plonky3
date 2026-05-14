@@ -11,7 +11,7 @@ use p3_zk_codes::ZkEncoding;
 use rand::distr::{Distribution, StandardUniform};
 use rand::{Rng, RngExt};
 
-use super::data::{MaskOracle, ZkSumcheckData};
+use super::data::{MaskOracle, ZkSumcheckData, ZkSumcheckHandoff};
 use crate::sumcheck::extrapolate_01inf;
 use crate::sumcheck::lagrange::lagrange_weights_01inf_multi;
 use crate::sumcheck::layout::{Layout, PrefixProver};
@@ -124,7 +124,7 @@ where
         self.inner.add_virtual_eval(challenger)
     }
 
-    /// Runs the HVZK sumcheck and returns the residual claim plus the mask oracles.
+    /// Runs the HVZK sumcheck and returns the typed residual handoff.
     ///
     /// # Phases
     ///
@@ -139,6 +139,7 @@ where
     ///
     /// - Residual sumcheck prover over the packed product polynomial, scaled by `eps`.
     /// - Vector of per-round challenges `gamma_1, ..., gamma_k`.
+    /// - Combining challenge `eps`, made explicit for code-switch composition.
     /// - One mask oracle per round, in round order.
     ///
     /// # Panics
@@ -154,7 +155,7 @@ where
         pow_bits: usize,
         challenger: &mut Ch,
         rng: &mut R,
-    ) -> (SumcheckProver<F, EF>, Point<EF>, Vec<MaskOracle<F, Enc, M>>)
+    ) -> ZkSumcheckHandoff<F, EF, Enc, M>
     where
         F: TwoAdicField,
         EF: ExtensionField<F> + TwoAdicField,
@@ -459,11 +460,12 @@ where
             "residual product polynomial dot product must equal eps * plain_residual_sum",
         );
 
-        (
-            SumcheckProver::new(prod_poly, residual_sum),
-            rs,
+        ZkSumcheckHandoff {
+            residual_prover: SumcheckProver::new(prod_poly, residual_sum),
+            randomness: rs,
+            eps,
             mask_oracles,
-        )
+        }
     }
 }
 

@@ -259,9 +259,13 @@ mod tests {
         let pow_bits = 0;
         let mut zk_data_real = ZkSumcheckData::<F, EF>::default();
         let mut real_rng = SmallRng::seed_from_u64(seed.wrapping_add(2));
-        let (_residual_real, _gammas_real, mask_oracles_real) =
+        let real_handoff =
             prover.into_sumcheck(&mut zk_data_real, pow_bits, &mut prover_ch, &mut real_rng);
-        let mask_commits_real: Vec<_> = mask_oracles_real.iter().map(|(c, _)| c.clone()).collect();
+        let mask_commits_real: Vec<_> = real_handoff
+            .mask_oracles
+            .iter()
+            .map(|(c, _)| c.clone())
+            .collect();
 
         // Honest verifier replay.
         let _ = verifier_real

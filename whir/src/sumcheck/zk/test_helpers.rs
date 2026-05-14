@@ -189,7 +189,7 @@ pub fn run_roundtrip(
     let mut zk_data = ZkSumcheckData::<F, EF>::default();
     // Distinct seed so mask sampling does not collide with witness draws.
     let mut prover_rng = SmallRng::seed_from_u64(seed.wrapping_add(2));
-    let (_residual_prover, prover_randomness, mask_oracles) = prover.into_sumcheck(
+    let prover_handoff = prover.into_sumcheck(
         &mut zk_data,
         pow_bits,
         &mut prover_challenger,
@@ -197,12 +197,16 @@ pub fn run_roundtrip(
     );
 
     // Public mask commits forwarded to the verifier; prover-side data discarded.
-    let mask_commits: Vec<_> = mask_oracles.iter().map(|(c, _)| c.clone()).collect();
+    let mask_commits: Vec<_> = prover_handoff
+        .mask_oracles
+        .iter()
+        .map(|(c, _)| c.clone())
+        .collect();
 
     // Phase 7: verifier replay.
     //
     // A mismatch in any shape or PoW check returns an error.
-    let (verifier_point, _final_target) = verifier
+    let verifier_handoff = verifier
         .into_sumcheck::<MyMmcs, _>(
             &zk_data,
             &mask_commits,
@@ -218,10 +222,13 @@ pub fn run_roundtrip(
     // Parallel challengers must derive the same per-round challenges:
     //
     //     prover_randomness == verifier_point
-    let prover_randomness_vec: Vec<EF> = prover_randomness.iter().copied().collect();
-    let verifier_randomness_vec: Vec<EF> = verifier_point.iter().copied().collect();
+    let prover_randomness_vec: Vec<EF> = prover_handoff.randomness.iter().copied().collect();
+    let verifier_randomness_vec: Vec<EF> = verifier_handoff.randomness.iter().copied().collect();
     if prover_randomness_vec != verifier_randomness_vec {
         return Err("prover/verifier disagreed on sumcheck randomness");
+    }
+    if prover_handoff.eps != verifier_handoff.eps {
+        return Err("prover/verifier disagreed on eps handoff");
     }
     Ok(())
 }
