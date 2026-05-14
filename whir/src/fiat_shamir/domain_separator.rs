@@ -24,6 +24,93 @@ pub(crate) struct SumcheckParams {
     pub pow_bits: usize,
 }
 
+#[cfg(test)]
+mod tests {
+    use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+    use p3_challenger::DuplexChallenger;
+    use p3_field::PrimeCharacteristicRing;
+    use p3_field::extension::BinomialExtensionField;
+
+    use super::*;
+    use crate::parameters::{ProtocolParameters, SecurityAssumption, WhirZkConfig};
+
+    type F = BabyBear;
+    type EF = BinomialExtensionField<F, 4>;
+    type Challenger = DuplexChallenger<F, Poseidon2BabyBear<16>, 16, 8>;
+
+    fn config() -> WhirConfig<EF, F, Challenger> {
+        let params = ProtocolParameters {
+            security_level: 32,
+            pow_bits: 0,
+            rs_domain_initial_reduction_factor: 1,
+            folding_factor: FoldingFactor::Constant(4),
+            soundness_type: SecurityAssumption::CapacityBound,
+            starting_log_inv_rate: 1,
+        };
+        WhirConfig::new(12, params)
+    }
+
+    fn observe_entry(count: usize, observe: Observe) -> F {
+        observe.as_field_element::<F>()
+            + F::from_usize(count)
+            + Pattern::Observe.as_field_element::<F>()
+    }
+
+    fn sample_entry(count: usize, sample: Sample) -> F {
+        sample.as_field_element::<F>()
+            + F::from_usize(count)
+            + Pattern::Sample.as_field_element::<F>()
+    }
+
+    #[test]
+    fn zk_domain_separator_uses_zk_sumcheck_shape() {
+        let ell_zk = 4usize;
+
+        let mut plain = DomainSeparator::<EF, F>::new(Vec::new());
+        let plain_config = config();
+        plain.commit_statement::<Challenger, 8>(&plain_config);
+        plain.add_whir_proof::<Challenger, 8>(&plain_config);
+
+        let mut zk = DomainSeparator::<EF, F>::new(Vec::new());
+        let zk_config = config().with_zk_config(WhirZkConfig::prefix_only(ell_zk, 2, 1));
+        zk.commit_statement::<Challenger, 8>(&zk_config);
+        zk.add_whir_proof::<Challenger, 8>(&zk_config);
+
+        assert_ne!(
+            plain.pattern, zk.pattern,
+            "ZK and plain WHIR must not share a domain separator pattern",
+        );
+        assert!(
+            zk.pattern
+                .contains(&observe_entry(1, Observe::ZkSumcheckMuTilde)),
+            "ZK sumcheck must bind mu_tilde in the domain separator",
+        );
+        assert!(
+            zk.pattern
+                .contains(&sample_entry(1, Sample::ZkSumcheckCombinationRandomness)),
+            "ZK sumcheck must bind eps sampling in the domain separator",
+        );
+        assert!(
+            zk.pattern
+                .contains(&observe_entry(ell_zk.max(3) - 1, Observe::ZkSumcheckPoly)),
+            "ZK sumcheck must bind the widened wire coefficient count",
+        );
+    }
+}
+
+/// Configuration for a HVZK sumcheck phase in the protocol.
+#[derive(Debug)]
+pub(crate) struct ZkSumcheckParams {
+    /// Number of sumcheck rounds.
+    pub rounds: usize,
+
+    /// Proof-of-work difficulty in bits.
+    pub pow_bits: usize,
+
+    /// Mask-code message length `ell_zk`.
+    pub ell_zk: usize,
+}
+
 /// Encodes the structure of an interactive protocol as a sequence of field elements.
 ///
 /// # Overview
@@ -201,6 +288,35 @@ where
             }
         }
 
+        match &config.zk {
+            None => self.protocol_param(0),
+            Some(zk) => {
+                self.protocol_param(1);
+                self.protocol_param(zk.mask_query_budget.unwrap_or(0));
+                self.protocol_param(zk.mask_message_len);
+                self.protocol_param(zk.mask_randomness_len);
+                self.protocol_param(zk.mask_rate_log_inv);
+                self.protocol_param(usize::from(zk.only_prefix));
+
+                self.protocol_param(config.round_parameters.len());
+                for round in &config.round_parameters {
+                    match &round.zk {
+                        None => self.protocol_param(0),
+                        Some(round_zk) => {
+                            self.protocol_param(1);
+                            self.protocol_param(round_zk.target_query_budget);
+                            self.protocol_param(round_zk.mask_query_budget);
+                            self.protocol_param(round_zk.mask_message_len);
+                            self.protocol_param(round_zk.mask_randomness_len);
+                            self.protocol_param(round_zk.ood_samples);
+                            self.protocol_param(round_zk.mask_domain_size);
+                            self.protocol_param(round_zk.mask_width);
+                        }
+                    }
+                }
+            }
+        }
+
         self.observe(DIGEST_ELEMS, Observe::MerkleDigest);
         self.add_ood(config.commitment_ood_samples);
     }
@@ -236,12 +352,22 @@ where
         EF: TwoAdicField,
         F: TwoAdicField,
     {
+        let zk_ell = config.zk.as_ref().map(|zk| zk.mask_message_len);
+
         // Initial combination randomness and first sumcheck phase.
         self.sample(1, Sample::InitialCombinationRandomness);
-        self.add_sumcheck(&SumcheckParams {
-            rounds: config.folding_factor.at_round(0),
-            pow_bits: config.starting_folding_pow_bits,
-        });
+        if let Some(ell_zk) = zk_ell {
+            self.add_zk_sumcheck::<DIGEST_ELEMS>(&ZkSumcheckParams {
+                rounds: config.folding_factor.at_round(0),
+                pow_bits: config.starting_folding_pow_bits,
+                ell_zk,
+            });
+        } else {
+            self.add_sumcheck(&SumcheckParams {
+                rounds: config.folding_factor.at_round(0),
+                pow_bits: config.starting_folding_pow_bits,
+            });
+        }
 
         // Intermediate rounds: commitment → OOD → PoW → checkpoint → queries → sumcheck.
         let mut domain_size = config.starting_domain_size();
@@ -252,6 +378,9 @@ where
 
             // Observe the new Merkle root and optional OOD evaluations.
             self.observe(DIGEST_ELEMS, Observe::MerkleDigest);
+            if r.zk.is_some() {
+                self.observe(DIGEST_ELEMS, Observe::MerkleDigest);
+            }
             self.add_ood(r.ood_samples);
 
             // PoW must precede query generation to prevent commitment shopping.
@@ -270,10 +399,18 @@ where
             // Combination randomness for the next polynomial, then sumcheck.
             self.sample(1, Sample::CombinationRandomness);
 
-            self.add_sumcheck(&SumcheckParams {
-                rounds: config.folding_factor.at_round(round + 1),
-                pow_bits: r.folding_pow_bits,
-            });
+            if let Some(round_zk) = &r.zk {
+                self.add_zk_sumcheck::<DIGEST_ELEMS>(&ZkSumcheckParams {
+                    rounds: config.folding_factor.at_round(round + 1),
+                    pow_bits: r.folding_pow_bits,
+                    ell_zk: round_zk.mask_message_len,
+                });
+            } else {
+                self.add_sumcheck(&SumcheckParams {
+                    rounds: config.folding_factor.at_round(round + 1),
+                    pow_bits: r.folding_pow_bits,
+                });
+            }
             domain_size >>= config.rs_reduction_factor(round);
         }
 
@@ -323,6 +460,36 @@ where
             self.sample(1, Sample::FoldingRandomness);
             // Optional grinding step after each sumcheck round.
             self.pow(pow_bits);
+        }
+    }
+
+    /// Append a Construction 6.3 HVZK sumcheck sub-protocol.
+    ///
+    /// # Transcript shape
+    ///
+    /// 1. Observe one mask commitment per sumcheck round.
+    /// 2. Observe `mu_tilde`.
+    /// 3. Sample the combining challenge `eps`.
+    /// 4. For each round, observe the wire polynomial coefficients, optionally
+    ///    grind, then sample the folding challenge.
+    pub(crate) fn add_zk_sumcheck<const DIGEST_ELEMS: usize>(&mut self, params: &ZkSumcheckParams) {
+        let ZkSumcheckParams {
+            rounds,
+            pow_bits,
+            ell_zk,
+        } = *params;
+
+        for _ in 0..rounds {
+            self.observe(DIGEST_ELEMS, Observe::MerkleDigest);
+        }
+        self.observe(1, Observe::ZkSumcheckMuTilde);
+        self.sample(1, Sample::ZkSumcheckCombinationRandomness);
+
+        let wire_coefficients = ell_zk.max(3) - 1;
+        for _ in 0..rounds {
+            self.observe(wire_coefficients, Observe::ZkSumcheckPoly);
+            self.pow(pow_bits);
+            self.sample(1, Sample::FoldingRandomness);
         }
     }
 
