@@ -95,6 +95,30 @@ mod tests {
                 .contains(&observe_entry(ell_zk.max(3) - 1, Observe::ZkSumcheckPoly)),
             "ZK sumcheck must bind the widened wire coefficient count",
         );
+
+        let round_zk = zk_config.round_parameters[0]
+            .zk
+            .as_ref()
+            .expect("ZK config should populate round 0");
+        let folded_domain_size =
+            zk_config.starting_domain_size() >> zk_config.folding_factor.at_round(0);
+        let source_domain_bytes = ((folded_domain_size * 2 - 1).ilog2() as usize).div_ceil(8);
+        let mask_domain_bytes = ((round_zk.mask_domain_size * 2 - 1).ilog2() as usize).div_ceil(8);
+
+        assert!(
+            zk.pattern.contains(&sample_entry(
+                round_zk.mask_query_budget * source_domain_bytes,
+                Sample::StirQueries,
+            )),
+            "ZK source-query sampling must use the derived mask query budget",
+        );
+        assert!(
+            zk.pattern.contains(&sample_entry(
+                round_zk.mask_query_budget * mask_domain_bytes,
+                Sample::StirQueries,
+            )),
+            "ZK mask-query sampling must be represented as its own STIR query phase",
+        );
     }
 }
 
@@ -392,7 +416,23 @@ where
             self.sample(1, Sample::TranscriptCheckpoint);
 
             // Draw STIR query positions and provide opening data.
-            self.sample(r.num_queries * domain_size_bytes, Sample::StirQueries);
+            if let Some(round_zk) = &r.zk {
+                self.sample(
+                    round_zk.mask_query_budget * domain_size_bytes,
+                    Sample::StirQueries,
+                );
+                self.hint(Hint::StirQueries);
+                self.hint(Hint::MerkleProof);
+
+                let mask_domain_size_bytes =
+                    ((round_zk.mask_domain_size * 2 - 1).ilog2() as usize).div_ceil(8);
+                self.sample(
+                    round_zk.mask_query_budget * mask_domain_size_bytes,
+                    Sample::StirQueries,
+                );
+            } else {
+                self.sample(r.num_queries * domain_size_bytes, Sample::StirQueries);
+            }
             self.hint(Hint::StirQueries);
             self.hint(Hint::MerkleProof);
 
