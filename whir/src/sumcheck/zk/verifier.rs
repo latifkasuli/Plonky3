@@ -7,7 +7,7 @@ use p3_commit::Mmcs;
 use p3_field::{ExtensionField, Field};
 use p3_multilinear_util::point::Point;
 
-use super::data::ZkSumcheckData;
+use super::data::{ZkSumcheckData, ZkVerifierHandoff};
 use crate::sumcheck::error::SumcheckError;
 use crate::sumcheck::layout::{LayoutStrategy, Verifier};
 use crate::sumcheck::strategy::VariableOrder;
@@ -91,6 +91,7 @@ where
     ///
     /// - Vector of per-round challenges `gamma_1, ..., gamma_k`.
     /// - Residual claim `target = h_k(gamma_k)`, fed to the downstream committed-sumcheck reduction.
+    /// - Combining challenge `eps`, made explicit for code-switch composition.
     ///
     /// # Errors
     ///
@@ -113,7 +114,7 @@ where
         folding_factor: usize,
         pow_bits: usize,
         challenger: &mut Ch,
-    ) -> Result<(Point<EF>, EF), SumcheckError>
+    ) -> Result<ZkVerifierHandoff<EF>, SumcheckError>
     where
         M: Mmcs<F>,
         Ch: FieldChallenger<F> + GrindingChallenger<Witness = F> + CanObserve<M::Commitment>,
@@ -231,7 +232,110 @@ where
             randomness.push(gamma_j);
         }
 
-        Ok((Point::new(randomness), target))
+        Ok(ZkVerifierHandoff {
+            randomness: Point::new(randomness),
+            claimed_residual: target,
+            eps,
+        })
+    }
+
+    /// Replays the HVZK sumcheck transcript against an explicit claim.
+    ///
+    /// Code-switching has already batched the previous claim, private OOD
+    /// answers, and source openings into `mu'`, so there is no layout alpha
+    /// prelude to replay here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_claim<M, Ch>(
+        zk_data: &ZkSumcheckData<F, EF>,
+        mask_commits: &[M::Commitment],
+        ell_zk: usize,
+        folding_factor: usize,
+        pow_bits: usize,
+        claimed_sum: EF,
+        challenger: &mut Ch,
+    ) -> Result<ZkVerifierHandoff<EF>, SumcheckError>
+    where
+        M: Mmcs<F>,
+        Ch: FieldChallenger<F> + GrindingChallenger<Witness = F> + CanObserve<M::Commitment>,
+    {
+        assert!(F::TWO != F::ZERO, "Lemma 6.4 requires char(F) != 2");
+        assert!(ell_zk >= 2, "Lemma 6.4 requires ell_zk >= 2");
+        assert!(folding_factor >= 1, "sumcheck requires at least one round");
+
+        if zk_data.ell_zk != ell_zk {
+            return Err(SumcheckError::EllZkMismatch {
+                expected: ell_zk,
+                actual: zk_data.ell_zk,
+            });
+        }
+        if zk_data.round_coefficients.len() != folding_factor {
+            return Err(SumcheckError::RoundCountMismatch {
+                expected: folding_factor,
+                actual: zk_data.round_coefficients.len(),
+            });
+        }
+        if mask_commits.len() != folding_factor {
+            return Err(SumcheckError::MaskCommitmentCountMismatch {
+                expected: folding_factor,
+                actual: mask_commits.len(),
+            });
+        }
+        let expected_pow = if pow_bits > 0 { folding_factor } else { 0 };
+        if zk_data.pow_witnesses.len() != expected_pow {
+            return Err(SumcheckError::PowWitnessCountMismatch {
+                expected: expected_pow,
+                actual: zk_data.pow_witnesses.len(),
+            });
+        }
+
+        let h_size = ell_zk.max(3);
+        let wire_size = h_size - 1;
+        for (idx, wire) in zk_data.round_coefficients.iter().enumerate() {
+            if wire.len() != wire_size {
+                return Err(SumcheckError::WireSizeMismatch {
+                    round: idx + 1,
+                    expected: wire_size,
+                    actual: wire.len(),
+                });
+            }
+        }
+
+        for commit in mask_commits {
+            challenger.observe(commit.clone());
+        }
+        challenger.observe_algebra_element(EF::from(zk_data.mu_tilde));
+        let eps: EF = challenger.sample_algebra_element();
+
+        let mut target = eps * claimed_sum + zk_data.mu_tilde;
+        let mut randomness = Vec::with_capacity(folding_factor);
+        for (j_idx, wire) in zk_data.round_coefficients.iter().enumerate() {
+            let c0 = wire[0];
+            let high_sum: EF = wire[1..].iter().copied().sum();
+            let c1 = target - c0.double() - high_sum;
+
+            challenger.observe_algebra_slice(wire);
+            if pow_bits > 0 && !challenger.check_witness(pow_bits, zk_data.pow_witnesses[j_idx]) {
+                return Err(SumcheckError::InvalidPowWitness);
+            }
+
+            let gamma_j: EF = challenger.sample_algebra_element();
+            let mut coeffs = Vec::with_capacity(h_size);
+            coeffs.push(c0);
+            coeffs.push(c1);
+            coeffs.extend_from_slice(&wire[1..]);
+            target = coeffs
+                .iter()
+                .rev()
+                .copied()
+                .fold(EF::ZERO, |acc, coeff| acc * gamma_j + coeff);
+            randomness.push(gamma_j);
+        }
+
+        Ok(ZkVerifierHandoff {
+            randomness: Point::new(randomness),
+            claimed_residual: target,
+            eps,
+        })
     }
 }
 
@@ -299,7 +403,7 @@ mod tests {
         // Honest prover sumcheck with grinding enabled.
         let mut zk_data = ZkSumcheckData::<F, EF>::default();
         let mut prover_rng = SmallRng::seed_from_u64(seed.wrapping_add(2));
-        let (_residual, _rand, mask_oracles) =
+        let prover_handoff =
             prover.into_sumcheck(&mut zk_data, pow_bits, &mut prover_ch, &mut prover_rng);
 
         // Sanity check before tampering: one witness per round.
@@ -308,7 +412,11 @@ mod tests {
         zk_data.pow_witnesses[0] += F::ONE;
 
         // Verifier replay against the tampered proof.
-        let mask_commits: Vec<_> = mask_oracles.iter().map(|(c, _)| c.clone()).collect();
+        let mask_commits: Vec<_> = prover_handoff
+            .mask_oracles
+            .iter()
+            .map(|(c, _)| c.clone())
+            .collect();
         let result = verifier.into_sumcheck::<MyMmcs, _>(
             &zk_data,
             &mask_commits,
@@ -369,12 +477,16 @@ mod tests {
         // Honest prover run; ell_zk recorded in zk_data is 4.
         let mut zk_data = ZkSumcheckData::<F, EF>::default();
         let mut prover_rng = SmallRng::seed_from_u64(seed.wrapping_add(2));
-        let (_residual, _rand, mask_oracles) =
+        let prover_handoff =
             prover.into_sumcheck(&mut zk_data, pow_bits, &mut prover_ch, &mut prover_rng);
 
         // Verifier replay with the wrong ell_zk parameter.
         let wrong_ell_zk = ell_zk + 1;
-        let mask_commits: Vec<_> = mask_oracles.iter().map(|(c, _)| c.clone()).collect();
+        let mask_commits: Vec<_> = prover_handoff
+            .mask_oracles
+            .iter()
+            .map(|(c, _)| c.clone())
+            .collect();
         let result = verifier.into_sumcheck::<MyMmcs, _>(
             &zk_data,
             &mask_commits,
@@ -456,13 +568,17 @@ mod tests {
             let pow_bits = 0;
             let mut zk_data = ZkSumcheckData::<F, EF>::default();
             let mut prover_rng = SmallRng::seed_from_u64(seed.wrapping_add(2));
-            let (_residual_prover, _gammas, mask_oracles) = prover.into_sumcheck(
+            let prover_handoff = prover.into_sumcheck(
                 &mut zk_data,
                 pow_bits,
                 &mut prover_challenger,
                 &mut prover_rng,
             );
-            let mask_commits: Vec<_> = mask_oracles.iter().map(|(c, _)| c.clone()).collect();
+            let mask_commits: Vec<_> = prover_handoff
+                .mask_oracles
+                .iter()
+                .map(|(c, _)| c.clone())
+                .collect();
 
             // Mutation: pick a uniformly random (round, position) and add ONE to that wire coefficient.
             let tamper_round = tamper_round_seed % zk_data.round_coefficients.len();
@@ -506,7 +622,7 @@ mod tests {
                 &mut honest_v_challenger,
             );
             prop_assert!(honest_result.is_ok());
-            let (_honest_rand, honest_target) = honest_result.unwrap();
+            let honest_handoff = honest_result.unwrap();
 
             // Tampered verifier replay: same setup, mutated wires.
             let mut tampered_v_challenger = MyChallenger::new(perm);
@@ -524,12 +640,12 @@ mod tests {
                 &mut tampered_v_challenger,
             );
             prop_assert!(tampered_result.is_ok());
-            let (_tampered_rand, tampered_target) = tampered_result.unwrap();
+            let tampered_handoff = tampered_result.unwrap();
 
             // The two targets must differ.
             // Probability of accidental coincidence is bounded by Lemma 6.5's negligible soundness error.
             prop_assert_ne!(
-                honest_target, tampered_target,
+                honest_handoff.claimed_residual, tampered_handoff.claimed_residual,
                 "tampering with wire coordinate ({}, {}) must change target",
                 tamper_round, tamper_pos,
             );
