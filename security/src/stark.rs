@@ -154,11 +154,26 @@ fn regime_report(
     batch: Option<SecurityTerm>,
     extras: &[SecurityTerm],
 ) -> RegimeReport {
-    let ali = air::composition_error(air.num_constraints, list_size, shape.modulus_bits);
     let deep = deep::deep_ali_error(air, shape, list_size);
+    regime_report_with_deep(
+        regime, air, shape, list_size, deep, ldt_error, batch, extras,
+    )
+}
+
+fn regime_report_with_deep(
+    regime: Regime,
+    air: &StarkAirParams,
+    shape: &InstanceShape,
+    list_size: f64,
+    deep_error: ErrorBits,
+    ldt_error: ErrorBits,
+    batch: Option<SecurityTerm>,
+    extras: &[SecurityTerm],
+) -> RegimeReport {
+    let ali = air::composition_error(air.num_constraints, list_size, shape.modulus_bits);
     let mut terms = Vec::with_capacity(5 + extras.len());
     terms.push(SecurityTerm::new(ALI_LABEL, ali));
-    terms.push(SecurityTerm::new(DEEP_LABEL, deep));
+    terms.push(SecurityTerm::new(DEEP_LABEL, deep_error));
     terms.push(SecurityTerm::new(LDT_LABEL, ldt_error));
     terms.extend(batch);
     terms.extend_from_slice(extras);
@@ -212,6 +227,58 @@ pub fn proven_security_report<L: LowDegreeTest>(
     });
 
     SecurityReport { udr, ldr }
+}
+
+/// Composite report using the complete source-form DEEP-ALI round-two term
+/// from [2024/1553] Theorems 2 and 3.
+///
+/// This is an arithmetic composition API, not an implementation adapter.
+/// `deep_params` must have been justified for the same executed protocol
+/// instance as `air`, `shape`, and `ldt`; in particular, callers must prove
+/// that their quotient representation supplies the recorded segment count
+/// and degree bound. The function returns `None` on invalid DEEP parameters
+/// instead of falling back to [`deep::deep_ali_error`].
+pub fn proven_security_report_with_source_deep_ali<L: LowDegreeTest>(
+    ldt: &L,
+    air: &StarkAirParams,
+    shape: &InstanceShape,
+    deep_params: &deep::DeepAliRoundTwoParams,
+    extras: &[SecurityTerm],
+) -> Option<SecurityReport> {
+    let log_blowup = ldt.log_blowup();
+
+    let udr_ldt = ldt.proven_error_udr(air, shape);
+    let udr_deep = deep::deep_ali_round_two_error_udr(air, deep_params)?;
+    let udr = regime_report_with_deep(
+        Regime::UniqueDecoding,
+        air,
+        shape,
+        list_size_udr(),
+        udr_deep,
+        udr_ldt,
+        batching_term(SecurityAssumption::UniqueDecoding, shape, log_blowup, None),
+        extras,
+    );
+
+    let ldr = match ldt.best_ldr(air, shape) {
+        Some((m, ldr_ldt)) => {
+            let list_size = list_size_ldr_m(log_blowup, m);
+            let ldr_deep = deep::deep_ali_round_two_error_ldr(air, deep_params, list_size)?;
+            Some(regime_report_with_deep(
+                Regime::ListDecoding { m },
+                air,
+                shape,
+                list_size,
+                ldr_deep,
+                ldr_ldt,
+                batching_term(SecurityAssumption::JohnsonBound, shape, log_blowup, Some(m)),
+                extras,
+            ))
+        }
+        None => None,
+    };
+
+    Some(SecurityReport { udr, ldr })
 }
 
 #[cfg(test)]
@@ -461,5 +528,76 @@ mod tests {
             )
             .max(0.0);
         assert!(batch_term.bits.bits() < fixed_m_bits);
+    }
+
+    #[test]
+    fn source_deep_report_uses_each_regimes_complete_round_two_term() {
+        use num_bigint::BigUint;
+
+        let regime = benchmark_regime();
+        let air = air();
+        let shape = shape();
+        let deep_params = deep::DeepAliRoundTwoParams {
+            field_cardinality: BigUint::from(1u8) << shape.modulus_bits,
+            evaluation_trace_domain_union_size: (1 << 21) + (1 << 20),
+            low_degree_bound: 1 << shape.log_trace_length,
+            expanded_low_degree_bound: (1 << shape.log_trace_length) + air.max_combo,
+            quotient_segment_count: 2,
+            quotient_segment_degree_bound: 1 << shape.log_trace_length,
+        };
+
+        let report =
+            proven_security_report_with_source_deep_ali(&regime, &air, &shape, &deep_params, &[])
+                .expect("valid source parameters produce a report");
+        let udr_deep = report
+            .udr
+            .terms()
+            .iter()
+            .find(|term| term.label == DEEP_LABEL)
+            .expect("UDR report carries the DEEP term");
+        assert_eq!(
+            udr_deep.bits,
+            deep::deep_ali_round_two_error_udr(&air, &deep_params).unwrap()
+        );
+
+        let ldr = report.ldr.as_ref().expect("benchmark has an LDR regime");
+        let Regime::ListDecoding { m } = ldr.regime else {
+            panic!("expected list-decoding report");
+        };
+        let list_size = list_size_ldr_m(regime.log_blowup, m);
+        let ldr_deep = ldr
+            .terms()
+            .iter()
+            .find(|term| term.label == DEEP_LABEL)
+            .expect("LDR report carries the DEEP term");
+        assert_eq!(
+            ldr_deep.bits,
+            deep::deep_ali_round_two_error_ldr(&air, &deep_params, list_size).unwrap()
+        );
+    }
+
+    #[test]
+    fn source_deep_report_never_falls_back_on_invalid_parameters() {
+        use num_bigint::BigUint;
+
+        let invalid = deep::DeepAliRoundTwoParams {
+            field_cardinality: BigUint::from(1u8) << 20usize,
+            evaluation_trace_domain_union_size: 1 << 20,
+            low_degree_bound: 1 << 10,
+            expanded_low_degree_bound: (1 << 10) + 2,
+            quotient_segment_count: 2,
+            quotient_segment_degree_bound: 1 << 10,
+        };
+
+        assert!(
+            proven_security_report_with_source_deep_ali(
+                &benchmark_regime(),
+                &air(),
+                &shape(),
+                &invalid,
+                &[],
+            )
+            .is_none()
+        );
     }
 }

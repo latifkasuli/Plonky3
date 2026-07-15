@@ -1,9 +1,11 @@
 //! FRI low-degree-test soundness.
 //!
 //! Conjectured regime: random-words bound, [2025/2010] §1.5.
-//! Proven regime: round-by-round, [2024/1553] Theorems 2 & 3, with the
-//! BCHKS25 LDR commit bound ([2025/2055] Theorem 4.2). Cross-checked
-//! against Ethereum's `soundcalc`.
+//! Proven LDT regime: BCHKS25 round-by-round proximity-gap bounds
+//! ([2025/2055] Theorems 1.5 and 4.2), cross-checked against Ethereum's
+//! `soundcalc`. The complete [2024/1553] DEEP-ALI term composes separately
+//! through [`crate::stark::proven_security_report_with_source_deep_ali`]
+//! after its source parameters are justified for the concrete protocol.
 //!
 //! Correspondence with [`crate::assumption::SecurityAssumption`]:
 //! - [`proven_error_udr`] is the FRI counterpart of `UniqueDecoding`
@@ -101,10 +103,20 @@ pub fn commit_phase_error_udr(regime: &FriRegime, shape: &InstanceShape) -> Opti
 }
 
 /// FRI commit-phase per-round error in LDR with explicit proximity
-/// parameter `m`. BCHKS25 Theorem 1.5 (Equation (1)):
+/// parameter `m`.
+///
+/// A binary fold uses BCHKS25 Theorem 1.5 (Equation (1)). A fold of
+/// arity greater than two is the degree-`M` curve case of Theorem 4.2,
+/// with `M = folding_factor - 1`. Plonky3 selects
+/// `γ = 1 - √ρ·(1 + 1/(2m))`; substituting that `γ` into Theorem 4.2's
+/// `ceil(√ρ / (1 - √ρ - γ))` gives the curve parameter `2m`.
+/// Thus, writing `m' = curve_m + 1/2`,
 ///
 /// ε_lin   = ((2·m'⁵ + 3·m'·γρ)·n / (3·ρ^{3/2}) + m'/√ρ) / |F|,
-/// ε_round = ε_lin · (folding − 1).
+/// ε_round = ε_lin · (folding − 1),
+///
+/// where `curve_m = m` for a binary fold and `curve_m = 2m` for a
+/// higher-arity fold.
 ///
 /// We also evaluate the n/q-style bound from [2024/1553] and report the
 /// tighter of the two. Round-by-round soundness is dominated by round 0
@@ -112,7 +124,6 @@ pub fn commit_phase_error_udr(regime: &FriRegime, shape: &InstanceShape) -> Opti
 pub fn commit_phase_error_ldr_m(regime: &FriRegime, shape: &InstanceShape, m: usize) -> ErrorBits {
     let rho = pow(2.0, -(regime.log_blowup as f64));
     let sqrt_rho = libm::sqrt(rho);
-    let m_shifted = m as f64 + 0.5;
     let pp = gamma_ldr_m(regime.log_blowup, m);
     if pp <= 0.0 {
         return ErrorBits::from_log2(0.0);
@@ -120,10 +131,16 @@ pub fn commit_phase_error_ldr_m(regime: &FriRegime, shape: &InstanceShape, m: us
     let lde_log = shape.log_trace_length + regime.log_blowup;
     let n = (1u64 << lde_log) as f64;
     let folding_minus_one = (regime.folding_factor() - 1.0).max(1.0);
+    let curve_m = if regime.max_log_arity <= 1 {
+        m
+    } else {
+        m.saturating_mul(2)
+    };
+    let curve_m_shifted = curve_m as f64 + 0.5;
 
-    let num = (2.0 * pow(m_shifted, 5.0) + 3.0 * m_shifted * pp * rho) * n;
+    let num = (2.0 * pow(curve_m_shifted, 5.0) + 3.0 * curve_m_shifted * pp * rho) * n;
     let den = 3.0 * rho * sqrt_rho;
-    let eps_linear = num / den + m_shifted / sqrt_rho;
+    let eps_linear = num / den + curve_m_shifted / sqrt_rho;
     let eps_powers = eps_linear * folding_minus_one;
     let bits_linear =
         shape.modulus_bits as f64 - log2(eps_powers.max(1.0)) + regime.commit_pow_bits as f64;
@@ -255,6 +272,51 @@ mod tests {
             max_constraint_degree: 2,
             max_combo: 2,
         }
+    }
+
+    fn expected_bchks_commit_bits(
+        regime: &FriRegime,
+        shape: &InstanceShape,
+        proximity_m: usize,
+        curve_m: usize,
+    ) -> f64 {
+        let rho = pow(2.0, -(regime.log_blowup as f64));
+        let sqrt_rho = libm::sqrt(rho);
+        let gamma = gamma_ldr_m(regime.log_blowup, proximity_m);
+        let shifted = curve_m as f64 + 0.5;
+        let n = (1u64 << (shape.log_trace_length + regime.log_blowup)) as f64;
+        let exceptional = ((2.0 * pow(shifted, 5.0) + 3.0 * shifted * gamma * rho) * n
+            / (3.0 * rho * sqrt_rho)
+            + shifted / sqrt_rho)
+            * (regime.folding_factor() - 1.0).max(1.0);
+        shape.modulus_bits as f64 - log2(exceptional) + regime.commit_pow_bits as f64
+    }
+
+    #[test]
+    fn binary_commit_bound_uses_theorem_1_5_parameter_m() {
+        let mut regime = benchmark_regime();
+        regime.max_log_arity = 1;
+        let shape = benchmark_shape();
+        let m = 3;
+
+        let actual = commit_phase_error_ldr_m(&regime, &shape, m).bits();
+        let theorem_1_5 = expected_bchks_commit_bits(&regime, &shape, m, m);
+
+        assert!((actual - theorem_1_5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn high_arity_commit_bound_uses_theorem_4_2_parameter_two_m() {
+        let regime = benchmark_regime();
+        let shape = benchmark_shape();
+        let m = 3;
+
+        let actual = commit_phase_error_ldr_m(&regime, &shape, m).bits();
+        let theorem_4_2 = expected_bchks_commit_bits(&regime, &shape, m, 2 * m);
+        let unsupported_two_function_extension = expected_bchks_commit_bits(&regime, &shape, m, m);
+
+        assert!((actual - theorem_4_2).abs() < 1e-12);
+        assert!(actual < unsupported_two_function_extension);
     }
 
     /// Regression vector for the benchmark configuration: log_blowup=1,

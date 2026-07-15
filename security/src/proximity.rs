@@ -8,7 +8,7 @@
 //!
 //! References:
 //! - [2020/654] Proximity Gaps for Reed–Solomon Codes
-//! - [2024/1553] On the Security of STARKs with FRI
+//! - [2024/1553] STARK-based Signatures from the RPO Permutation
 //! - [2025/2055] BCHKS25 Theorem 4.2
 
 use libm::{ceil, pow, sqrt};
