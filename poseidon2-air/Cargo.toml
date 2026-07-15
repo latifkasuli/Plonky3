@@ -23,6 +23,7 @@ rand.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+rand = { workspace = true, features = ["sys_rng"] }
 p3-baby-bear = { path = "../baby-bear" }
 p3-challenger = { path = "../challenger" }
 p3-commit = { path = "../commit" }

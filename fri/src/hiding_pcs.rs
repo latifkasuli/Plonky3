@@ -11,7 +11,7 @@ use p3_matrix::dense::{DenseMatrix, RowMajorMatrix, RowMajorMatrixCow};
 use p3_matrix::horizontally_truncated::HorizontallyTruncated;
 use p3_matrix::row_index_mapped::RowIndexMappedView;
 use rand::distr::{Distribution, StandardUniform};
-use rand::{Rng, RngExt, SeedableRng};
+use rand::{CryptoRng, Rng, RngExt, SeedableRng};
 use spin::Mutex;
 use tracing::info_span;
 
@@ -19,12 +19,15 @@ use crate::verifier::FriError;
 use crate::{BatchMultiOpening, FriParameters, FriProof, TwoAdicFriPcs};
 
 /// A hiding FRI PCS. Both MMCSs must also be hiding; this is not enforced at compile time so it's
-/// the user's responsibility to configure.
+/// the user's responsibility to configure. `R` must implement [`CryptoRng`], but callers remain
+/// responsible for seeding it from sufficient entropy. That bound establishes a computational
+/// RNG interface, not the paper's information-theoretic uniformity assumption.
 #[derive(Debug)]
-pub struct HidingFriPcs<Val, Dft, InputMmcs, FriMmcs, R> {
+pub struct HidingFriPcs<Val, Dft, InputMmcs, FriMmcs, R: CryptoRng> {
     inner: TwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs>,
     num_random_codewords: usize,
     rng: Mutex<R>,
+    quotient_degree_reports: Mutex<Vec<LagrangeQuotientHidingDegreeReport>>,
 }
 
 /// Check the Lagrange-quotient hiding capacity from ePrint 2024/1037,
@@ -55,6 +58,63 @@ pub fn lagrange_quotient_hiding_query_bounds_are_satisfied(
     quotient_queries <= trace_domain_size && required_witness_freedom <= trace_domain_size
 }
 
+/// Exact degree bookkeeping for the Lagrange-quotient hiding construction.
+///
+/// This report binds the implementation choice `h_p = |H_i|` to the quotient degree
+/// ranges in ePrint 2024/1037, Section 4.2. Every quotient chunk is interpolated
+/// from `|H_i|` values, so it starts in `F[X]^{<|H_i|}`. Each nonfinal quotient randomizer
+/// is represented by `|H_i|` values drawn from `R`; multiplication by the coset vanishing
+/// polynomial gives an implemented randomized-chunk bound of `<2|H_i|`. The report describes
+/// only degree and shape, not the source paper's independent-uniform sampling assumption.
+///
+/// The source permits the final component to have degree below
+/// `|H| + max((d + 1)h, h_p)`, which is at least the implementation's `<2|H|`
+/// bound when `d > 1`. Arithmetic overflow and invalid shapes return `None`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LagrangeQuotientHidingDegreeReport {
+    pub quotient_chunk_domain_size: usize,
+    pub quotient_chunk_count: usize,
+    pub quotient_randomizer_coefficients_per_column: usize,
+    pub implemented_randomized_chunk_degree_bound_exclusive: usize,
+    pub source_nonfinal_chunk_degree_bound_exclusive: usize,
+    pub source_final_chunk_degree_bound_exclusive: usize,
+}
+
+pub fn lagrange_quotient_hiding_degree_report(
+    quotient_chunk_domain_size: usize,
+    quotient_chunk_count: usize,
+) -> Option<LagrangeQuotientHidingDegreeReport> {
+    if quotient_chunk_domain_size == 0 || quotient_chunk_count <= 1 {
+        return None;
+    }
+
+    let implemented_randomized_chunk_degree_bound_exclusive =
+        quotient_chunk_domain_size.checked_mul(2)?;
+    let source_nonfinal_chunk_degree_bound_exclusive =
+        quotient_chunk_domain_size.checked_add(quotient_chunk_domain_size)?;
+    let source_final_extra = quotient_chunk_count
+        .checked_add(1)?
+        .checked_mul(quotient_chunk_domain_size)?
+        .max(quotient_chunk_domain_size);
+    let source_final_chunk_degree_bound_exclusive =
+        quotient_chunk_domain_size.checked_add(source_final_extra)?;
+
+    if implemented_randomized_chunk_degree_bound_exclusive
+        > source_final_chunk_degree_bound_exclusive
+    {
+        return None;
+    }
+
+    Some(LagrangeQuotientHidingDegreeReport {
+        quotient_chunk_domain_size,
+        quotient_chunk_count,
+        quotient_randomizer_coefficients_per_column: quotient_chunk_domain_size,
+        implemented_randomized_chunk_degree_bound_exclusive,
+        source_nonfinal_chunk_degree_bound_exclusive,
+        source_final_chunk_degree_bound_exclusive,
+    })
+}
+
 /// Cloning forks the RNG stream by drawing a fresh seed from the source RNG,
 /// so the clone and the original never produce the same sequence of masks.
 impl<Val, Dft, InputMmcs, FriMmcs, R> Clone for HidingFriPcs<Val, Dft, InputMmcs, FriMmcs, R>
@@ -63,18 +123,19 @@ where
     Dft: Clone,
     InputMmcs: Clone,
     FriMmcs: Clone,
-    R: Rng + SeedableRng,
+    R: Rng + CryptoRng + SeedableRng,
 {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
             num_random_codewords: self.num_random_codewords,
             rng: Mutex::new(R::from_rng(&mut *self.rng.lock())),
+            quotient_degree_reports: Mutex::new(self.quotient_degree_reports.lock().clone()),
         }
     }
 }
 
-impl<Val, Dft, InputMmcs, FriMmcs, R> HidingFriPcs<Val, Dft, InputMmcs, FriMmcs, R> {
+impl<Val, Dft, InputMmcs, FriMmcs, R: CryptoRng> HidingFriPcs<Val, Dft, InputMmcs, FriMmcs, R> {
     pub const fn new(
         dft: Dft,
         mmcs: InputMmcs,
@@ -87,7 +148,16 @@ impl<Val, Dft, InputMmcs, FriMmcs, R> HidingFriPcs<Val, Dft, InputMmcs, FriMmcs,
             inner,
             num_random_codewords,
             rng: Mutex::new(rng),
+            quotient_degree_reports: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Return the degree reports recorded by actual quotient-randomization calls.
+    ///
+    /// This is execution evidence for the concrete chunk sizes and counts seen by this PCS. It
+    /// does not attest to the RNG's seed source or establish the source paper's simulator claim.
+    pub fn quotient_degree_reports(&self) -> Vec<LagrangeQuotientHidingDegreeReport> {
+        self.quotient_degree_reports.lock().clone()
     }
 }
 
@@ -102,7 +172,7 @@ where
     Challenge: TwoAdicField + ExtensionField<Val>,
     Challenger:
         FieldChallenger<Val> + CanObserve<FriMmcs::Commitment> + GrindingChallenger<Witness = Val>,
-    R: Rng + Send + Sync,
+    R: Rng + CryptoRng + Send + Sync,
 {
     type Domain = TwoAdicMultiplicativeCoset<Val>;
     type Commitment = InputMmcs::Commitment;
@@ -152,6 +222,15 @@ where
                     .into_iter()
                     .map(|(domain, mat)| {
                         let mat_width = mat.width();
+                        let randomized_trace_height = mat
+                            .height()
+                            .checked_mul(2)
+                            .expect("ZK trace height must fit usize");
+                        assert_eq!(
+                            domain.size(),
+                            randomized_trace_height,
+                            "ZK trace domain must have exactly twice the unrandomized trace height"
+                        );
                         // Let `w` and `h` be the width and height of the original matrix. The randomized matrix should have height `2h` and width `w + num_random_codewords`.
                         // To generate it, we add `w + 2 * num_random_codewords` columns to the original matrix, then reshape it by setting the width to `w + num_random_codewords`.
                         // All columns are added on the right hand side so, after reshaping, this has the net effect of adding `num_random_codewords` random columns on the right and interleaving the original trace with random rows.
@@ -215,6 +294,30 @@ where
             "num_chunks must be > 1 to preserve hiding (got {num_chunks})"
         );
         let (domains, evaluations): (Vec<_>, Vec<_>) = evaluations.into_iter().unzip();
+        assert_eq!(
+            domains.len(),
+            num_chunks,
+            "num_chunks must match the quotient partition"
+        );
+        let first = evaluations
+            .first()
+            .expect("a hiding quotient partition must contain at least two chunks");
+        let h = first.height();
+        let input_width = first.width();
+        assert!(
+            evaluations
+                .iter()
+                .all(|evaluation| evaluation.height() == h && evaluation.width() == input_width),
+            "all hiding quotient chunks must have one common nonempty shape"
+        );
+        let degree_report = lagrange_quotient_hiding_degree_report(h, num_chunks)
+            .expect("ZK quotient degree bookkeeping must be valid and fit usize");
+        assert_eq!(
+            degree_report.implemented_randomized_chunk_degree_bound_exclusive,
+            degree_report.source_nonfinal_chunk_degree_bound_exclusive,
+            "implemented quotient randomizers must match the source first-chunk degree regime"
+        );
+        self.quotient_degree_reports.lock().push(degree_report);
         let cis = quotient_chunk_selector_normalizers(&domains)
             .expect("split quotient domains must be nonempty and disjoint");
         let mut rng = self.rng.lock();
@@ -222,18 +325,30 @@ where
             .into_iter()
             .map(|mat| mat.with_random_cols(self.num_random_codewords, &mut *rng))
             .collect();
+        let w = randomized_evaluations[0].width();
+        assert_eq!(
+            w,
+            input_width + self.num_random_codewords,
+            "hiding quotient width must include every random codeword"
+        );
         // Add random values to the LDE evaluations as described in https://eprint.iacr.org/2024/1037.pdf.
         // If we have `d` chunks, let q'_i(X) = q_i(X) + v_H_i(X) * t_i(X) where t_i(X) is random, for 1 <= i < d.
         // Equation (15) forces q'_d(X) = q_d(X) - v_H_d(X) c_d^-1 \sum_i c_i t_i(X), where c_i is a Lagrange normalization constant.
         // The source PDF's Equation (14) sums over k but prints c_i t_i; the preservation identity fixes the bound index as written here.
-        let h = randomized_evaluations[0].height();
-        let w = randomized_evaluations[0].width();
-        let mut all_random_values = (0..(randomized_evaluations.len() - 1) * h * w)
+        let values_per_chunk = h
+            .checked_mul(w)
+            .expect("ZK quotient randomizer size must fit usize");
+        let sampled_values = randomized_evaluations
+            .len()
+            .checked_sub(1)
+            .and_then(|count| count.checked_mul(values_per_chunk))
+            .expect("ZK quotient randomizer allocation must fit usize");
+        let mut all_random_values = (0..sampled_values)
             .map(|_| rng.random())
-            .chain(core::iter::repeat_n(Val::ZERO, h * w))
+            .chain(core::iter::repeat_n(Val::ZERO, values_per_chunk))
             .collect::<Vec<_>>();
 
-        balance_quotient_randomizers(&cis, h * w, &mut all_random_values)
+        balance_quotient_randomizers(&cis, values_per_chunk, &mut all_random_values)
             .expect("quotient randomizer shape and selector normalizers must be valid");
 
         domains
@@ -242,43 +357,53 @@ where
             .enumerate()
             .map(|(i, (domain, evals))| {
                 assert_eq!(domain.size(), evals.height());
-                let shift = Val::GENERATOR / domain.shift();
                 let random_values = &all_random_values[i * h * w..(i + 1) * h * w];
 
-                // Commit to the bit-reversed LDE.
-                let mut lde_evals = self
+                // Work in the logical polynomial basis for this chunk's own coset. This avoids
+                // relying on a manual DFT-variable rescaling: `coset_idft_batch` recovers the
+                // coefficients of q_i(X), then we add
+                //
+                //     Z_{H_i}(X) t_i(X) = (g_i^{-h} X^h - 1) t_i(X)
+                //
+                // coefficientwise before evaluating the randomized polynomial on the common
+                // FRI coset. The previous rescaling shortcut did not produce this polynomial for
+                // arbitrary transcript points and could lead to `FinalPolyMismatch`.
+                let mut randomized_coefficients =
+                    self.inner.dft.coset_idft_batch(evals, domain.shift());
+                let added_bits = self
                     .inner
-                    .dft
-                    .coset_lde_batch(evals, self.inner.fri.log_blowup + 1, shift)
-                    .to_row_major_matrix();
+                    .fri
+                    .log_blowup
+                    .checked_add(1)
+                    .expect("ZK quotient LDE exponent must fit usize");
+                let added_bits_u32 =
+                    u32::try_from(added_bits).expect("ZK quotient LDE exponent must fit u32");
+                let lde_height = h
+                    .checked_shl(added_bits_u32)
+                    .expect("ZK quotient LDE height must fit usize");
+                let lde_values = lde_height
+                    .checked_mul(w)
+                    .expect("ZK quotient LDE allocation must fit usize");
+                randomized_coefficients.values.resize(lde_values, Val::ZERO);
+                assert_eq!(randomized_coefficients.width(), w);
+                assert_eq!(randomized_coefficients.values.len(), lde_values);
 
-                // Evaluate `v_H(X) * r(X)` over the LDE, where:
-                // - `v_H` is the coset vanishing polynomial, here equal to (GENERATOR * X / domain.shift)^n - 1,
-                // - and `r` is a random polynomial.
-                let mut vanishing_poly_coeffs =
-                    Val::zero_vec((h * w) << (self.inner.fri.log_blowup + 1));
-                let p = shift.exp_u64(h as u64);
-                Val::GENERATOR
-                    .powers()
-                    .take(h)
-                    .enumerate()
-                    .for_each(|(i, p_i)| {
-                        for j in 0..w {
-                            let mul_coeff = p_i * random_values[i * w + j];
-                            vanishing_poly_coeffs[i * w + j] -= mul_coeff;
-                            vanishing_poly_coeffs[(h + i) * w + j] = p * mul_coeff;
-                        }
-                    });
-                let random_eval = self
-                    .inner
-                    .dft
-                    .dft_batch(DenseMatrix::new(vanishing_poly_coeffs, w))
-                    .to_row_major_matrix();
-
-                // Add the quotient chunk evaluations over the LDE to the evaluations of `v_H(X) * r(X)`.
-                for i in 0..h * w * (1 << (self.inner.fri.log_blowup + 1)) {
-                    lde_evals.values[i] += random_eval.values[i];
+                let h_u64 = u64::try_from(h).expect("ZK quotient chunk size must fit u64");
+                let vanishing_leading_coefficient = domain.shift().inverse().exp_u64(h_u64);
+                for coefficient in 0..h {
+                    for column in 0..w {
+                        let randomizer = random_values[coefficient * w + column];
+                        randomized_coefficients.values[coefficient * w + column] -= randomizer;
+                        randomized_coefficients.values[(h + coefficient) * w + column] +=
+                            vanishing_leading_coefficient * randomizer;
+                    }
                 }
+
+                let lde_evals = self
+                    .inner
+                    .dft
+                    .coset_dft_batch(randomized_coefficients, Val::GENERATOR)
+                    .to_row_major_matrix();
 
                 lde_evals.bit_reverse_rows().to_row_major_matrix()
             })
@@ -557,7 +682,7 @@ fn balance_quotient_randomizers<F: Field>(
 ) -> Option<()> {
     if normalizers.len() < 2
         || values_per_chunk == 0
-        || randomizers.len() != normalizers.len() * values_per_chunk
+        || normalizers.len().checked_mul(values_per_chunk) != Some(randomizers.len())
     {
         return None;
     }
@@ -589,7 +714,7 @@ mod tests {
     use p3_merkle_tree::MerkleTreeMmcs;
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
     use rand::SeedableRng;
-    use rand::rngs::SmallRng;
+    use rand::rngs::{SmallRng, StdRng};
 
     use super::*;
 
@@ -603,7 +728,7 @@ mod tests {
     type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
     type Dft = Radix2Dit<Val>;
     type Challenger = DuplexChallenger<Val, Perm, 16, 8>;
-    type MyPcs = HidingFriPcs<Val, Dft, ValMmcs, ChallengeMmcs, SmallRng>;
+    type MyPcs = HidingFriPcs<Val, Dft, ValMmcs, ChallengeMmcs, StdRng>;
 
     type Commitment = <ValMmcs as Mmcs<Val>>::Commitment;
     type Domain = TwoAdicMultiplicativeCoset<Val>;
@@ -646,6 +771,31 @@ mod tests {
     }
 
     #[test]
+    fn lagrange_quotient_hiding_degree_report_matches_source_regime() {
+        for quotient_chunk_count in [2, 4, 8] {
+            let report = lagrange_quotient_hiding_degree_report(16, quotient_chunk_count)
+                .expect("valid source degree regime");
+            assert_eq!(report.quotient_chunk_domain_size, 16);
+            assert_eq!(report.quotient_chunk_count, quotient_chunk_count);
+            assert_eq!(report.quotient_randomizer_coefficients_per_column, 16);
+            assert_eq!(
+                report.implemented_randomized_chunk_degree_bound_exclusive,
+                32
+            );
+            assert_eq!(report.source_nonfinal_chunk_degree_bound_exclusive, 32);
+            assert_eq!(
+                report.source_final_chunk_degree_bound_exclusive,
+                16 + (quotient_chunk_count + 1) * 16
+            );
+        }
+
+        assert!(lagrange_quotient_hiding_degree_report(0, 2).is_none());
+        assert!(lagrange_quotient_hiding_degree_report(16, 1).is_none());
+        assert!(lagrange_quotient_hiding_degree_report(usize::MAX, 2).is_none());
+        assert!(lagrange_quotient_hiding_degree_report(16, usize::MAX).is_none());
+    }
+
+    #[test]
     fn quotient_randomizer_balance_preserves_recomposition() {
         let domain = Domain::new(Val::GENERATOR, 4).unwrap();
 
@@ -671,6 +821,123 @@ mod tests {
                     })
                     .sum::<Val>();
                 assert_eq!(weighted_sum, Val::ZERO, "failed for {num_chunks} chunks");
+            }
+        }
+    }
+
+    #[test]
+    fn randomized_quotient_ldes_preserve_recomposition_at_arbitrary_points() {
+        let mut setup_rng = SmallRng::seed_from_u64(9);
+        let perm = Perm::new_from_rng_128(&mut setup_rng);
+        let hash = MyHash::new(perm.clone());
+        let compress = MyCompress::new(perm);
+        let val_mmcs = ValMmcs::new(hash, compress, 0);
+        let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
+        let fri_params = FriParameters {
+            log_blowup: 1,
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 2,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+            mmcs: challenge_mmcs,
+        };
+        let pcs = MyPcs::new(
+            Dft::default(),
+            val_mmcs,
+            fri_params,
+            NUM_RANDOM_CODEWORDS,
+            StdRng::seed_from_u64(10),
+        );
+
+        let quotient_domain = Domain::new(Val::GENERATOR, 4).unwrap();
+        let coefficients = (0..quotient_domain.size())
+            .map(|i| Val::from_usize(i * i + 3 * i + 7))
+            .collect_vec();
+        let quotient_evaluations = quotient_domain
+            .iter()
+            .map(|point| {
+                coefficients
+                    .iter()
+                    .rev()
+                    .fold(Val::ZERO, |acc, &coefficient| acc * point + coefficient)
+            })
+            .collect_vec();
+
+        for num_chunks in [2, 4, 8] {
+            let chunk_domains = quotient_domain.split_domains(num_chunks);
+            let chunk_evaluations = quotient_domain.split_evals(
+                num_chunks,
+                RowMajorMatrix::new_col(quotient_evaluations.clone()),
+            );
+            let plain_ldes = chunk_domains
+                .iter()
+                .copied()
+                .zip(chunk_evaluations.clone())
+                .map(|(domain, evaluations)| {
+                    pcs.inner
+                        .dft
+                        .coset_lde_batch(
+                            evaluations,
+                            pcs.inner.fri.log_blowup + 1,
+                            Val::GENERATOR / domain.shift(),
+                        )
+                        .bit_reverse_rows()
+                        .to_row_major_matrix()
+                })
+                .collect_vec();
+            let ldes = <MyPcs as Pcs<Challenge, Challenger>>::get_quotient_ldes(
+                &pcs,
+                chunk_domains.iter().copied().zip(chunk_evaluations),
+                num_chunks,
+            );
+
+            for point in [Val::from_u32(12345), Val::from_u32(67890)] {
+                let selectors = p3_commit::quotient_chunk_selectors_at_point(&chunk_domains, point)
+                    .expect("split quotient domains are disjoint");
+                let recomposed = ldes
+                    .iter()
+                    .zip(selectors)
+                    .map(|(lde, selector)| {
+                        let standard_order = lde.clone().bit_reverse_rows().to_row_major_matrix();
+                        let column = (0..standard_order.height())
+                            .map(|row| standard_order.get(row, 0).unwrap())
+                            .collect_vec();
+                        let lde_domain = Domain::new(
+                            Val::GENERATOR,
+                            p3_util::log2_strict_usize(standard_order.height()),
+                        )
+                        .unwrap();
+                        selector * lde_domain.evaluate_polynomial_at(&column, point)
+                    })
+                    .sum::<Val>();
+                let plain_recomposed = plain_ldes
+                    .iter()
+                    .zip(
+                        p3_commit::quotient_chunk_selectors_at_point(&chunk_domains, point)
+                            .unwrap(),
+                    )
+                    .map(|(lde, selector)| {
+                        let standard_order = lde.clone().bit_reverse_rows().to_row_major_matrix();
+                        let column = (0..standard_order.height())
+                            .map(|row| standard_order.get(row, 0).unwrap())
+                            .collect_vec();
+                        let lde_domain = Domain::new(
+                            Val::GENERATOR,
+                            p3_util::log2_strict_usize(standard_order.height()),
+                        )
+                        .unwrap();
+                        selector * lde_domain.evaluate_polynomial_at(&column, point)
+                    })
+                    .sum::<Val>();
+                let expected = quotient_domain.evaluate_polynomial_at(&quotient_evaluations, point);
+
+                assert_eq!(plain_recomposed, expected);
+
+                assert_eq!(
+                    recomposed, expected,
+                    "failed for {num_chunks} chunks at {point}"
+                );
             }
         }
     }
@@ -722,7 +989,7 @@ mod tests {
             val_mmcs,
             fri_params,
             NUM_RANDOM_CODEWORDS,
-            SmallRng::seed_from_u64(2),
+            StdRng::seed_from_u64(2),
         );
 
         // The wrapper interleaves the trace with random rows, doubling its

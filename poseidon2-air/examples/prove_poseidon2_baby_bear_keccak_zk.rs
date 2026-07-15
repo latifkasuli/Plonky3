@@ -12,9 +12,9 @@ use p3_keccak::{Keccak256Hash, KeccakF};
 use p3_merkle_tree::MerkleTreeHidingMmcs;
 use p3_poseidon2_air::{RoundConstants, VectorizedPoseidon2Air};
 use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher};
-use p3_uni_stark::{StarkConfig, prove, verify};
+use p3_uni_stark::{StarkConfig, StarkGenericConfig, prove, verify};
 use rand::SeedableRng;
-use rand::rngs::SmallRng;
+use rand::rngs::{SmallRng, StdRng, SysRng};
 #[cfg(target_family = "unix")]
 use tikv_jemallocator::Jemalloc;
 use tracing_forest::ForestLayer;
@@ -64,20 +64,22 @@ fn main() -> Result<(), impl Debug> {
     type MyCompress = CompressionFunctionFromHasher<U64Hash, 2, 4>;
     let compress = MyCompress::new(u64_hash);
 
-    // WARNING: DO NOT USE SmallRng in proper applications! Use a real PRNG instead!
     type ValMmcs = MerkleTreeHidingMmcs<
         [Val; p3_keccak::VECTOR_LEN],
         [u64; p3_keccak::VECTOR_LEN],
         FieldHash,
         MyCompress,
-        SmallRng,
+        StdRng,
         2,
         4,
         4,
     >;
     let mut rng = SmallRng::seed_from_u64(1);
     let constants = RoundConstants::from_rng(&mut rng);
-    let val_mmcs = ValMmcs::new(field_hash, compress, 0, rng);
+    let mut sys_rng = SysRng;
+    let mmcs_rng = StdRng::try_from_rng(&mut sys_rng)
+        .expect("the OS entropy source must seed the hiding MMCS RNG");
+    let val_mmcs = ValMmcs::new(field_hash, compress, 0, mmcs_rng);
 
     type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
     let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
@@ -102,13 +104,34 @@ fn main() -> Result<(), impl Debug> {
 
     let dft = Dft::default();
 
-    type Pcs = HidingFriPcs<Val, Dft, ValMmcs, ChallengeMmcs, SmallRng>;
-    let pcs = Pcs::new(dft, val_mmcs, fri_params, 4, SmallRng::seed_from_u64(1));
+    type Pcs = HidingFriPcs<Val, Dft, ValMmcs, ChallengeMmcs, StdRng>;
+    let pcs_rng = StdRng::try_from_rng(&mut sys_rng)
+        .expect("the OS entropy source must seed the hiding PCS RNG");
+    let pcs = Pcs::new(dft, val_mmcs, fri_params, 4, pcs_rng);
 
     type MyConfig = StarkConfig<Pcs, Challenge, Challenger>;
     let config = MyConfig::new(pcs, challenger);
 
     let proof = prove(&config, &air, trace, &[]);
 
-    verify(&config, &air, &proof, &[])
+    verify(&config, &air, &proof, &[]).expect("the concrete ZK proof must verify");
+
+    let degree_reports = config.pcs().quotient_degree_reports();
+    assert_eq!(
+        degree_reports.len(),
+        1,
+        "the concrete example must execute exactly one quotient-randomization call"
+    );
+    let report = degree_reports[0];
+    println!(
+        "P3_FRI_ZK_RUNTIME_V0 proof_verified=true rng_algorithm=StdRng rng_seed_source=SysRng mmcs_rng_algorithm=StdRng mmcs_seed_source=SysRng quotient_chunk_domain_size={} quotient_chunk_count={} quotient_randomizer_coefficients_per_column={} implemented_randomized_chunk_degree_bound_exclusive={} source_nonfinal_chunk_degree_bound_exclusive={} source_final_chunk_degree_bound_exclusive={} perfect_uniformity_established=false simulator_transfer_established=false zero_knowledge_established=false",
+        report.quotient_chunk_domain_size,
+        report.quotient_chunk_count,
+        report.quotient_randomizer_coefficients_per_column,
+        report.implemented_randomized_chunk_degree_bound_exclusive,
+        report.source_nonfinal_chunk_degree_bound_exclusive,
+        report.source_final_chunk_degree_bound_exclusive,
+    );
+
+    Ok::<(), &'static str>(())
 }
