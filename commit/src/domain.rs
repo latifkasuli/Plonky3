@@ -488,11 +488,13 @@ mod tests {
     use alloc::vec::Vec;
 
     use p3_baby_bear::BabyBear;
-    use p3_field::PrimeCharacteristicRing;
+    use p3_field::extension::BinomialExtensionField;
+    use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
 
     use super::*;
 
     type F = BabyBear;
+    type EF = BinomialExtensionField<F, 4>;
 
     #[test]
     fn evaluate_periodic_columns_at_matches_per_column_eval() {
@@ -528,11 +530,11 @@ mod tests {
         );
     }
 
-    fn eval_poly(coefficients: &[F], point: F) -> F {
+    fn eval_poly<Ext: ExtensionField<F>>(coefficients: &[F], point: Ext) -> Ext {
         coefficients
             .iter()
             .rev()
-            .fold(F::ZERO, |acc, &coefficient| acc * point + coefficient)
+            .fold(Ext::ZERO, |acc, &coefficient| acc * point + coefficient)
     }
 
     #[test]
@@ -562,25 +564,33 @@ mod tests {
             .iter()
             .map(|point| eval_poly(&coefficients, point))
             .collect_vec();
-        let point = F::from_u32(12345);
-        let expected = eval_poly(&coefficients, point);
+        let extension_point = EF::from_basis_coefficients_slice(&[
+            F::from_u32(12345),
+            F::ONE,
+            F::from_u32(2),
+            F::from_u32(3),
+        ])
+        .unwrap();
 
-        for num_chunks in [2, 4, 8] {
-            let chunks = domain.split_domains(num_chunks);
-            let split_evaluations =
-                domain.split_evals(num_chunks, RowMajorMatrix::new_col(evaluations.clone()));
-            let selectors = quotient_chunk_selectors_at_point(&chunks, point)
-                .expect("split domains are disjoint");
-            let actual = chunks
-                .iter()
-                .zip(split_evaluations)
-                .zip(selectors)
-                .map(|((chunk, values), selector)| {
-                    selector * chunk.evaluate_polynomial_at(&values.values, point)
-                })
-                .sum::<F>();
+        for point in [EF::from(F::from_u32(12345)), extension_point] {
+            let expected = eval_poly(&coefficients, point);
+            for num_chunks in [2, 4, 8] {
+                let chunks = domain.split_domains(num_chunks);
+                let split_evaluations =
+                    domain.split_evals(num_chunks, RowMajorMatrix::new_col(evaluations.clone()));
+                let selectors = quotient_chunk_selectors_at_point(&chunks, point)
+                    .expect("split domains are disjoint");
+                let actual = chunks
+                    .iter()
+                    .zip(split_evaluations)
+                    .zip(selectors)
+                    .map(|((chunk, values), selector)| {
+                        selector * chunk.evaluate_polynomial_at(&values.values, point)
+                    })
+                    .sum::<EF>();
 
-            assert_eq!(actual, expected, "failed for {num_chunks} chunks");
+                assert_eq!(actual, expected, "failed for {num_chunks} chunks");
+            }
         }
     }
 
