@@ -1,11 +1,10 @@
 use alloc::vec::Vec;
 
-use itertools::Itertools;
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
-use p3_commit::{Mmcs, OpenedValues, Pcs, PolynomialSpace};
+use p3_commit::{Mmcs, OpenedValues, Pcs, quotient_chunk_selector_normalizers};
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::coset::TwoAdicMultiplicativeCoset;
-use p3_field::{ExtensionField, TwoAdicField, batch_multiplicative_inverse};
+use p3_field::{ExtensionField, Field, TwoAdicField};
 use p3_matrix::Matrix;
 use p3_matrix::bitrev::{BitReversalPerm, BitReversibleMatrix};
 use p3_matrix::dense::{DenseMatrix, RowMajorMatrix, RowMajorMatrixCow};
@@ -175,13 +174,8 @@ where
             "num_chunks must be > 1 to preserve hiding (got {num_chunks})"
         );
         let (domains, evaluations): (Vec<_>, Vec<_>) = evaluations.into_iter().unzip();
-        let cis = get_zp_cis(&domains);
-        let last_chunk = num_chunks - 1;
-        let last_chunk_ci_inv = cis[last_chunk].inverse();
-        let mul_coeffs = (0..last_chunk)
-            .map(|i| cis[i] * last_chunk_ci_inv)
-            .collect_vec();
-
+        let cis = quotient_chunk_selector_normalizers(&domains)
+            .expect("split quotient domains must be nonempty and disjoint");
         let mut rng = self.rng.lock();
         let randomized_evaluations: Vec<RowMajorMatrix<Val>> = evaluations
             .into_iter()
@@ -197,14 +191,8 @@ where
             .chain(core::iter::repeat_n(Val::ZERO, h * w))
             .collect::<Vec<_>>();
 
-        // Set the random values for the final chunk accordingly
-        for j in 0..last_chunk {
-            let mul_coeff = mul_coeffs[j];
-            for k in 0..h * w {
-                let t = all_random_values[j * h * w + k] * mul_coeff;
-                all_random_values[last_chunk * h * w + k] -= t;
-            }
-        }
+        balance_quotient_randomizers(&cis, h * w, &mut all_random_values)
+            .expect("quotient randomizer shape and selector normalizers must be valid");
 
         domains
             .into_iter()
@@ -472,37 +460,47 @@ where
     }
 }
 
-/// Compute the normalizing constants for the Langrange selectors of the provided domains.
-/// See Section 4.2 of <https://eprint.iacr.org/2024/1037.pdf> for more details.
-fn get_zp_cis<D: PolynomialSpace>(qc_domains: &[D]) -> Vec<p3_commit::Val<D>> {
-    batch_multiplicative_inverse(
-        &qc_domains
-            .iter()
-            .enumerate()
-            .map(|(i, domain)| {
-                qc_domains
-                    .iter()
-                    .enumerate()
-                    .filter(|(j, _)| *j != i)
-                    .map(|(_, other_domain)| {
-                        other_domain.vanishing_poly_at_point(domain.first_point())
-                    })
-                    .product()
-            })
-            .collect::<Vec<_>>(),
-    )
+/// Fill the final quotient randomizer so the selector-weighted sum is zero.
+///
+/// If `c_i` are the quotient selector normalizers, this enforces
+/// `sum_i c_i t_i = 0` at every coefficient position. Consequently adding
+/// `Z_{H_i} t_i` to chunk `i` preserves the recomposed quotient polynomial.
+fn balance_quotient_randomizers<F: Field>(
+    normalizers: &[F],
+    values_per_chunk: usize,
+    randomizers: &mut [F],
+) -> Option<()> {
+    if normalizers.len() < 2
+        || values_per_chunk == 0
+        || randomizers.len() != normalizers.len() * values_per_chunk
+    {
+        return None;
+    }
+
+    let last_chunk = normalizers.len() - 1;
+    let last_normalizer_inv = normalizers[last_chunk].try_inverse()?;
+    for chunk in 0..last_chunk {
+        let multiplier = normalizers[chunk] * last_normalizer_inv;
+        for offset in 0..values_per_chunk {
+            let value = randomizers[chunk * values_per_chunk + offset] * multiplier;
+            randomizers[last_chunk * values_per_chunk + offset] -= value;
+        }
+    }
+
+    Some(())
 }
 
 #[cfg(test)]
 mod tests {
     use alloc::vec;
 
+    use itertools::Itertools;
     use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
     use p3_challenger::DuplexChallenger;
-    use p3_commit::ExtensionMmcs;
+    use p3_commit::{ExtensionMmcs, PolynomialSpace};
     use p3_dft::Radix2Dit;
-    use p3_field::Field;
     use p3_field::extension::BinomialExtensionField;
+    use p3_field::{Field, PrimeCharacteristicRing};
     use p3_merkle_tree::MerkleTreeMmcs;
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
     use rand::SeedableRng;
@@ -537,6 +535,36 @@ mod tests {
     /// hidden part (`proof.0`) — the split `verify` re-merges and whose shape the
     /// new error variants guard.
     const NUM_RANDOM_CODEWORDS: usize = 2;
+
+    #[test]
+    fn quotient_randomizer_balance_preserves_recomposition() {
+        let domain = Domain::new(Val::GENERATOR, 4).unwrap();
+
+        for num_chunks in [2, 4, 8] {
+            let domains = domain.split_domains(num_chunks);
+            let normalizers =
+                quotient_chunk_selector_normalizers(&domains).expect("split domains are disjoint");
+            let values_per_chunk = 5;
+            let mut randomizers = (0..(num_chunks - 1) * values_per_chunk)
+                .map(|i| Val::from_usize(i * i + 11))
+                .chain(core::iter::repeat_n(Val::ZERO, values_per_chunk))
+                .collect_vec();
+
+            balance_quotient_randomizers(&normalizers, values_per_chunk, &mut randomizers)
+                .expect("valid randomizer shape");
+
+            for offset in 0..values_per_chunk {
+                let weighted_sum = normalizers
+                    .iter()
+                    .enumerate()
+                    .map(|(chunk, normalizer)| {
+                        *normalizer * randomizers[chunk * values_per_chunk + offset]
+                    })
+                    .sum::<Val>();
+                assert_eq!(weighted_sum, Val::ZERO, "failed for {num_chunks} chunks");
+            }
+        }
+    }
 
     /// Run a real prover roundtrip and return `(pcs, claims, proof, challenger)`
     /// ready to verify, with `challenger` advanced past the commitment.

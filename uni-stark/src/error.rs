@@ -37,6 +37,9 @@ pub enum InvalidProofShapeError {
     /// Quotient opened values count doesn't match domain count.
     #[error("air {air}: quotient domains count mismatch")]
     QuotientDomainsCountMismatch { air: usize },
+    /// Quotient chunk domains do not define normalized Lagrange selectors.
+    #[error("air {air}: quotient chunk selector normalization failed")]
+    QuotientSelectorNormalizationFailed { air: usize },
     /// Preprocessed trace opened values width doesn't match expected.
     #[error(
         "preprocessed trace width mismatch: expected local={expected_local}, next={expected_next}, got local={got_local}, next={got_next}"

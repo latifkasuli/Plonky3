@@ -7,7 +7,7 @@ use itertools::Itertools;
 use p3_air::symbolic::SymbolicAirBuilder;
 use p3_air::{Air, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{Pcs, PolynomialSpace};
+use p3_commit::{Pcs, PolynomialSpace, quotient_chunk_selectors_at_point};
 use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrixView;
 use p3_matrix::stack::VerticalPair;
@@ -99,39 +99,28 @@ pub fn recompose_quotient_from_chunks<SC>(
     quotient_chunks_domains: &[Domain<SC>],
     quotient_chunks: &[Vec<SC::Challenge>],
     zeta: SC::Challenge,
-) -> SC::Challenge
+) -> Option<SC::Challenge>
 where
     SC: StarkGenericConfig,
 {
-    let zps = quotient_chunks_domains
-        .iter()
-        .enumerate()
-        .map(|(i, domain)| {
-            quotient_chunks_domains
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != i)
-                .map(|(_, other_domain)| {
-                    other_domain.vanishing_poly_at_point(zeta)
-                        * other_domain
-                            .vanishing_poly_at_point(domain.first_point())
-                            .inverse()
-                })
-                .product::<SC::Challenge>()
-        })
-        .collect_vec();
+    if quotient_chunks_domains.len() != quotient_chunks.len() {
+        return None;
+    }
+    let zps = quotient_chunk_selectors_at_point(quotient_chunks_domains, zeta)?;
 
     // valid_shape checks each ch has length <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION,
     // so from_ext_basis_coefficients won't return None.
-    quotient_chunks
-        .iter()
-        .enumerate()
-        .map(|(ch_i, ch)| {
-            zps[ch_i]
-                * SC::Challenge::from_ext_basis_coefficients(ch)
-                    .expect("quotient chunk length checked in valid_shape")
-        })
-        .sum::<SC::Challenge>()
+    Some(
+        quotient_chunks
+            .iter()
+            .enumerate()
+            .map(|(ch_i, ch)| {
+                zps[ch_i]
+                    * SC::Challenge::from_ext_basis_coefficients(ch)
+                        .expect("quotient chunk length checked in valid_shape")
+            })
+            .sum::<SC::Challenge>(),
+    )
 }
 
 /// Verifies that the folded constraints match the quotient polynomial at zeta.
@@ -524,7 +513,8 @@ where
         &quotient_chunks_domains,
         &opened_values.quotient_chunks,
         zeta,
-    );
+    )
+    .ok_or(InvalidProofShapeError::QuotientSelectorNormalizationFailed { air: 0 })?;
 
     let zeros;
     let trace_next_slice = match &opened_values.trace_next {

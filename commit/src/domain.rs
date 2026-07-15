@@ -200,6 +200,71 @@ pub trait PolynomialSpace: Copy {
     }
 }
 
+/// Compute the normalizing constants for the Lagrange selectors associated with
+/// a partition into quotient-chunk domains.
+///
+/// For domains `H_i`, the selector for chunk `i` is
+///
+/// ```text
+/// L_i(X) = c_i * product_{j != i} Z_{H_j}(X),
+/// c_i = product_{j != i} Z_{H_j}(h_i)^{-1},
+/// ```
+///
+/// where `h_i` is the first point of `H_i`. The result is `None` when the
+/// domain list is empty or the domains are not disjoint, because in that case a
+/// normalizing denominator is zero and the quotient decomposition is invalid.
+pub fn quotient_chunk_selector_normalizers<D: PolynomialSpace>(
+    domains: &[D],
+) -> Option<Vec<D::Val>> {
+    if domains.is_empty() {
+        return None;
+    }
+
+    let denominators = domains
+        .iter()
+        .enumerate()
+        .map(|(i, domain)| {
+            domains
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, other_domain)| other_domain.vanishing_poly_at_point(domain.first_point()))
+                .product::<D::Val>()
+        })
+        .collect_vec();
+    if denominators.iter().any(Field::is_zero) {
+        return None;
+    }
+    Some(batch_multiplicative_inverse(&denominators))
+}
+
+/// Evaluate the normalized quotient-chunk Lagrange selectors at `point`.
+///
+/// Returns `None` under the same invalid-domain conditions as
+/// [`quotient_chunk_selector_normalizers`].
+pub fn quotient_chunk_selectors_at_point<D, Ext>(domains: &[D], point: Ext) -> Option<Vec<Ext>>
+where
+    D: PolynomialSpace,
+    Ext: ExtensionField<D::Val>,
+{
+    let normalizers = quotient_chunk_selector_normalizers(domains)?;
+    Some(
+        domains
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                domains
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, other_domain)| other_domain.vanishing_poly_at_point(point))
+                    .product::<Ext>()
+                    * normalizers[i]
+            })
+            .collect(),
+    )
+}
+
 impl<Val: TwoAdicField> PolynomialSpace for TwoAdicMultiplicativeCoset<Val> {
     type Val = Val;
 
@@ -461,5 +526,71 @@ mod tests {
             domain.evaluate_periodic_columns_at(&columns, point),
             Vec::<F>::new()
         );
+    }
+
+    fn eval_poly(coefficients: &[F], point: F) -> F {
+        coefficients
+            .iter()
+            .rev()
+            .fold(F::ZERO, |acc, &coefficient| acc * point + coefficient)
+    }
+
+    #[test]
+    fn quotient_chunk_selectors_are_kronecker_on_partition() {
+        let domain = TwoAdicMultiplicativeCoset::<F>::new(F::GENERATOR, 4).unwrap();
+
+        for num_chunks in [2, 4, 8] {
+            let chunks = domain.split_domains(num_chunks);
+            for (point_index, point_domain) in chunks.iter().enumerate() {
+                let selectors =
+                    quotient_chunk_selectors_at_point(&chunks, point_domain.first_point())
+                        .expect("split domains are disjoint");
+                for (selector_index, selector) in selectors.into_iter().enumerate() {
+                    assert_eq!(selector, F::from_bool(selector_index == point_index));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn quotient_chunk_recomposition_matches_original_polynomial() {
+        let domain = TwoAdicMultiplicativeCoset::<F>::new(F::GENERATOR, 4).unwrap();
+        let coefficients = (0..domain.size())
+            .map(|i| F::from_usize(i * i + 3 * i + 7))
+            .collect_vec();
+        let evaluations = domain
+            .iter()
+            .map(|point| eval_poly(&coefficients, point))
+            .collect_vec();
+        let point = F::from_u32(12345);
+        let expected = eval_poly(&coefficients, point);
+
+        for num_chunks in [2, 4, 8] {
+            let chunks = domain.split_domains(num_chunks);
+            let split_evaluations =
+                domain.split_evals(num_chunks, RowMajorMatrix::new_col(evaluations.clone()));
+            let selectors = quotient_chunk_selectors_at_point(&chunks, point)
+                .expect("split domains are disjoint");
+            let actual = chunks
+                .iter()
+                .zip(split_evaluations)
+                .zip(selectors)
+                .map(|((chunk, values), selector)| {
+                    selector * chunk.evaluate_polynomial_at(&values.values, point)
+                })
+                .sum::<F>();
+
+            assert_eq!(actual, expected, "failed for {num_chunks} chunks");
+        }
+    }
+
+    #[test]
+    fn quotient_chunk_selector_normalizers_reject_invalid_partitions() {
+        let domain = TwoAdicMultiplicativeCoset::<F>::new(F::GENERATOR, 3).unwrap();
+
+        assert!(
+            quotient_chunk_selector_normalizers(&[] as &[TwoAdicMultiplicativeCoset<F>]).is_none()
+        );
+        assert!(quotient_chunk_selector_normalizers(&[domain, domain]).is_none());
     }
 }

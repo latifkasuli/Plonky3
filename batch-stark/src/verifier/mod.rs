@@ -506,7 +506,8 @@ where
                 .base_opened_values
                 .quotient_chunks,
             zeta,
-        );
+        )
+        .ok_or(InvalidProofShapeError::QuotientSelectorNormalizationFailed { air: i })?;
 
         // Recompose permutation openings into extension-field columns.
         //
