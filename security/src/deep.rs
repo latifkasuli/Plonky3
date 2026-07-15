@@ -13,7 +13,7 @@
 
 use core::cmp::max;
 
-use libm::{log2, nextafter};
+use libm::log2;
 use num_bigint::BigUint;
 
 use crate::error::ErrorBits;
@@ -93,7 +93,7 @@ fn deep_ali_round_two_error(
         || params.quotient_segment_count == 0
         || params.quotient_segment_degree_bound == 0
         || !list_size.is_finite()
-        || list_size <= 0.0
+        || list_size < 1.0
     {
         return None;
     }
@@ -115,49 +115,49 @@ fn deep_ali_round_two_error(
     let selected = max(first_branch, second_branch);
 
     let list_power = if square_list_size { 2.0 } else { 0.0 };
-    let list_size_log_upper = nextafter(log2(list_size), f64::INFINITY);
+    let list_size_log_upper = ceil_log2_f64(list_size);
     let rational_bits =
         log2_biguint_lower_bound(&denominator) - log2_biguint_upper_bound(&selected);
     let bits = rational_bits - list_power * list_size_log_upper;
     Some(ErrorBits::from_log2(bits.max(0.0)))
 }
 
-/// Conservative floating-point `log2`: truncate to the leading 52 bits
-/// before converting to `f64`. The result never exceeds the exact logarithm,
-/// so its use in `log2(denominator) - log2(numerator)` cannot overstate the
-/// denominator contribution.
+/// Exact integer lower bound on `log2(value)`.
 fn log2_biguint_lower_bound(value: &BigUint) -> f64 {
     let bits = value.bits();
     debug_assert!(bits > 0);
-    let shift = bits.saturating_sub(52);
-    let leading = value >> shift;
-    let leading_digits = leading.to_u64_digits();
-    debug_assert_eq!(leading_digits.len(), 1);
-    nextafter(
-        log2(leading_digits[0] as f64) + shift as f64,
-        f64::NEG_INFINITY,
-    )
+    (bits - 1) as f64
 }
 
-/// Conservative upper bound matching [`log2_biguint_lower_bound`]. Values
-/// wider than 52 bits are truncated and then rounded up by one unit in the
-/// retained prefix. Subtracting this result cannot overstate security bits.
+/// Exact integer upper bound on `log2(value)`.
 fn log2_biguint_upper_bound(value: &BigUint) -> f64 {
     let bits = value.bits();
     debug_assert!(bits > 0);
-    if bits <= 52 {
-        let digits = value.to_u64_digits();
-        debug_assert_eq!(digits.len(), 1);
-        return nextafter(log2(digits[0] as f64), f64::INFINITY);
+    let is_power_of_two = value
+        .to_u64_digits()
+        .iter()
+        .map(|digit| digit.count_ones())
+        .sum::<u32>()
+        == 1;
+    if is_power_of_two {
+        (bits - 1) as f64
+    } else {
+        bits as f64
     }
-    let shift = bits - 52;
-    let leading = value >> shift;
-    let leading_digits = leading.to_u64_digits();
-    debug_assert_eq!(leading_digits.len(), 1);
-    nextafter(
-        log2((leading_digits[0] + 1) as f64) + shift as f64,
-        f64::INFINITY,
-    )
+}
+
+/// Exact integer upper bound on the logarithm of a positive normal `f64`.
+/// Source list-size bounds smaller than one are invalid for this calculator.
+fn ceil_log2_f64(value: f64) -> f64 {
+    debug_assert!(value.is_finite() && value >= 1.0);
+    let raw = value.to_bits();
+    let exponent = ((raw >> 52) & 0x7ff) as i32 - 1023;
+    let fraction = raw & ((1u64 << 52) - 1);
+    if fraction == 0 {
+        exponent as f64
+    } else {
+        (exponent + 1) as f64
+    }
 }
 
 #[cfg(test)]
@@ -196,7 +196,7 @@ mod source_tests {
         let denominator = 2f64.powi(128) - params.evaluation_trace_domain_union_size as f64;
         let expected = log2(denominator) - log2(second as f64);
         assert!(result.bits() <= expected);
-        assert!((result.bits() - expected).abs() < 1e-12);
+        assert!(expected - result.bits() < 2.0);
     }
 
     #[test]
@@ -205,7 +205,7 @@ mod source_tests {
         let list_size = 17.5;
         let udr = deep_ali_round_two_error_udr(&air(), &params).unwrap();
         let ldr = deep_ali_round_two_error_ldr(&air(), &params, list_size).unwrap();
-        assert!((ldr.bits() - (udr.bits() - 2.0 * log2(list_size))).abs() < 1e-12);
+        assert_eq!(ldr.bits(), udr.bits() - 2.0 * ceil_log2_f64(list_size));
     }
 
     #[test]
@@ -231,12 +231,18 @@ mod source_tests {
         let numerator_floor = log2_biguint_lower_bound(&numerator);
         let numerator_ceil = log2_biguint_upper_bound(&numerator);
 
-        assert!(denominator_floor <= denominator_ceil);
-        assert!(numerator_floor <= numerator_ceil);
-        assert!(denominator_floor - numerator_ceil <= denominator_ceil - numerator_floor);
-        assert!(denominator_floor <= 200.0);
-        assert!(denominator_ceil >= 200.0);
-        assert!(numerator_floor <= 120.0);
-        assert!(numerator_ceil > 120.0);
+        assert_eq!(denominator_floor, 199.0);
+        assert_eq!(denominator_ceil, 200.0);
+        assert_eq!(numerator_floor, 120.0);
+        assert_eq!(numerator_ceil, 121.0);
+        assert_eq!(denominator_floor - numerator_ceil, 78.0);
+    }
+
+    #[test]
+    fn floating_list_size_log_ceiling_is_directional_at_boundaries() {
+        assert_eq!(ceil_log2_f64(1.0), 0.0);
+        assert_eq!(ceil_log2_f64(2.0), 1.0);
+        assert_eq!(ceil_log2_f64(f64::from_bits(2.0f64.to_bits() + 1)), 2.0);
+        assert_eq!(ceil_log2_f64(17.5), 5.0);
     }
 }
