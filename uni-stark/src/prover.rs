@@ -128,6 +128,14 @@ where
 
     // Initialize the PCS and the Challenger.
     let pcs = config.pcs();
+    if SC::Pcs::ZK {
+        // Protocol 3 samples one extension-field point zeta; opening both zeta
+        // and its next-row point is the single Q_F query counted by the source.
+        assert!(
+            pcs.zk_query_bounds_are_satisfied(degree, 1),
+            "ZK randomizer degree is insufficient for ePrint 2024/1037 Equations (16) and (17): trace domain size {degree}"
+        );
+    }
     let mut challenger = config.initialise_challenger();
 
     // Get the subgroup `H` of size `N`. We treat each column `T_i` of

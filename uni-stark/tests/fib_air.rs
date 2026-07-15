@@ -273,14 +273,26 @@ fn test_public_value_impl(n: usize, x: u64, log_final_poly_len: usize) {
 
 #[test]
 fn test_zk() {
-    let n = 1 << 3;
-    let x = 21;
+    // The generic PCS backstop conservatively counts zeta and zeta_next as
+    // distinct extension openings, requiring 2 * (4 * 2 + 2) = 20 <= N.
+    let n = 1 << 5;
+    let x = 2_178_309;
 
     let trace = generate_trace_rows::<Val>(0, 1, n);
     let config = make_zk_config();
     let pis = vec![BabyBear::ZERO, BabyBear::ONE, BabyBear::from_u64(x)];
     let proof = prove(&config, &FibonacciAir {}, trace, &pis);
     verify(&config, &FibonacciAir {}, &proof, &pis).expect("verification failed");
+}
+
+#[test]
+#[should_panic(expected = "ePrint 2024/1037 Equations (16) and (17)")]
+fn test_zk_rejects_underprovisioned_query_capacity() {
+    let trace = generate_trace_rows::<Val>(0, 1, 1 << 3);
+    let config = make_zk_config();
+    let pis = vec![BabyBear::ZERO, BabyBear::ONE, BabyBear::from_u64(21)];
+
+    let _ = prove(&config, &FibonacciAir {}, trace, &pis);
 }
 
 #[test]
@@ -371,14 +383,15 @@ fn test_degree_bits_too_small_for_zk_rejected() {
     // malicious proof sets degree_bits = 0 while is_zk = 1, that subtraction
     // underflows. The verifier must reject this before any arithmetic.
 
-    // Generate a valid 2^3 = 8-row Fibonacci trace.
-    let trace = generate_trace_rows::<Val>(0, 1, 1 << 3);
+    // Generate a valid 2^5 = 32-row Fibonacci trace. The generic PCS
+    // backstop conservatively counts both zeta and zeta_next.
+    let trace = generate_trace_rows::<Val>(0, 1, 1 << 5);
 
     // ZK-enabled config — is_zk = 1, meaning degree_bits must be >= 1.
     let config = make_zk_config();
 
-    // Public inputs: [fib(0), fib(1), fib(7)] = [0, 1, 21].
-    let pis = vec![BabyBear::ZERO, BabyBear::ONE, BabyBear::from_u64(21)];
+    // Public inputs: [fib(0), fib(1), fib(31)] = [0, 1, 2178309].
+    let pis = vec![BabyBear::ZERO, BabyBear::ONE, BabyBear::from_u64(2_178_309)];
 
     // Produce a legitimate ZK proof, then tamper with degree_bits.
     let mut proof = prove(&config, &FibonacciAir {}, trace, &pis);

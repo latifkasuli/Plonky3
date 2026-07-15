@@ -43,6 +43,20 @@ where
     /// Set to true to activate randomization and achieve zero-knowledge.
     const ZK: bool;
 
+    /// Return whether this PCS has enough randomizer degree for the declared
+    /// out-of-domain and in-domain query counts.
+    ///
+    /// ZK STARK provers call this before committing. The default is deliberately
+    /// fail-closed: a future hiding PCS must implement its own source-backed
+    /// capacity check before setting [`Self::ZK`] to `true`.
+    fn zk_query_bounds_are_satisfied(
+        &self,
+        _trace_domain_size: usize,
+        _num_extension_queries: usize,
+    ) -> bool {
+        false
+    }
+
     /// Index of the trace commitment in the computed opened values.
     const TRACE_IDX: usize = Self::ZK as usize;
 

@@ -27,6 +27,34 @@ pub struct HidingFriPcs<Val, Dft, InputMmcs, FriMmcs, R> {
     rng: Mutex<R>,
 }
 
+/// Check the Lagrange-quotient hiding capacity from ePrint 2024/1037,
+/// Equations (16) and (17), under this implementation's choice
+/// `h = h_p = |H|`.
+///
+/// `num_extension_queries` is `n_F`, `num_domain_queries` is `n_D`, and
+/// `extension_degree` is `e = [F : F_p]`. Arithmetic overflow fails closed.
+pub fn lagrange_quotient_hiding_query_bounds_are_satisfied(
+    trace_domain_size: usize,
+    extension_degree: usize,
+    num_extension_queries: usize,
+    num_domain_queries: usize,
+) -> bool {
+    let Some(quotient_queries) = num_extension_queries.checked_add(num_domain_queries) else {
+        return false;
+    };
+    let Some(weighted_queries) = extension_degree
+        .checked_mul(num_extension_queries)
+        .and_then(|count| count.checked_add(num_domain_queries))
+    else {
+        return false;
+    };
+    let Some(required_witness_freedom) = weighted_queries.checked_mul(2) else {
+        return false;
+    };
+
+    quotient_queries <= trace_domain_size && required_witness_freedom <= trace_domain_size
+}
+
 /// Cloning forks the RNG stream by drawing a fresh seed from the source RNG,
 /// so the clone and the original never produce the same sequence of masks.
 impl<Val, Dft, InputMmcs, FriMmcs, R> Clone for HidingFriPcs<Val, Dft, InputMmcs, FriMmcs, R>
@@ -90,6 +118,19 @@ where
     type Error = FriError<FriMmcs::Error, InputMmcs::Error>;
 
     const ZK: bool = true;
+
+    fn zk_query_bounds_are_satisfied(
+        &self,
+        trace_domain_size: usize,
+        num_extension_queries: usize,
+    ) -> bool {
+        lagrange_quotient_hiding_query_bounds_are_satisfied(
+            trace_domain_size,
+            Challenge::DIMENSION,
+            num_extension_queries,
+            self.inner.fri.num_queries,
+        )
+    }
 
     fn natural_domain_for_degree(&self, degree: usize) -> Self::Domain {
         <TwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs> as Pcs<Challenge, Challenger>>::natural_domain_for_degree(
@@ -182,8 +223,9 @@ where
             .map(|mat| mat.with_random_cols(self.num_random_codewords, &mut *rng))
             .collect();
         // Add random values to the LDE evaluations as described in https://eprint.iacr.org/2024/1037.pdf.
-        // If we have `d` chunks, let q'_i(X) = q_i(X) + v_H_i(X) * t_i(X) where t(X) is random, for 1 <= i < d.
-        // q'_d(X) = q_d(X) - v_H_d(X) c_i \sum t_i(X) where c_i is a Lagrange normalization constant.
+        // If we have `d` chunks, let q'_i(X) = q_i(X) + v_H_i(X) * t_i(X) where t_i(X) is random, for 1 <= i < d.
+        // Equation (15) forces q'_d(X) = q_d(X) - v_H_d(X) c_d^-1 \sum_i c_i t_i(X), where c_i is a Lagrange normalization constant.
+        // The source PDF's Equation (14) sums over k but prints c_i t_i; the preservation identity fixes the bound index as written here.
         let h = randomized_evaluations[0].height();
         let w = randomized_evaluations[0].width();
         let mut all_random_values = (0..(randomized_evaluations.len() - 1) * h * w)
@@ -312,6 +354,49 @@ where
         challenger: &mut Challenger,
         is_preprocessing: bool,
     ) -> (OpenedValues<Challenge>, Self::Proof) {
+        // A generic PCS caller can request arbitrary extension-field openings,
+        // so conservatively count every distinct point as one Q_F query. The
+        // STARK provers perform the protocol-specific one-zeta check before
+        // committing; this backstop keeps direct PCS use fail-closed as well.
+        let mut extension_query_points = Vec::<Challenge>::new();
+        for (_, points_by_matrix) in &rounds {
+            for point in points_by_matrix.iter().flatten() {
+                if !extension_query_points.contains(point) {
+                    extension_query_points.push(*point);
+                }
+            }
+        }
+
+        let lde_log = self
+            .inner
+            .fri
+            .log_blowup
+            .checked_add(1)
+            .expect("ZK LDE exponent must fit usize");
+        let lde_shift = u32::try_from(lde_log).expect("ZK LDE exponent must fit u32");
+        let lde_factor = 1usize
+            .checked_shl(lde_shift)
+            .expect("ZK LDE factor must fit usize");
+        for (data, _) in &rounds {
+            for matrix in self.inner.mmcs.get_matrices(data) {
+                assert!(
+                    matrix.height() % lde_factor == 0,
+                    "ZK committed LDE height must be divisible by twice the FRI blowup"
+                );
+                let trace_domain_size = matrix.height() / lde_factor;
+                assert!(
+                    lagrange_quotient_hiding_query_bounds_are_satisfied(
+                        trace_domain_size,
+                        Challenge::DIMENSION,
+                        extension_query_points.len(),
+                        self.inner.fri.num_queries,
+                    ),
+                    "ZK randomizer degree is insufficient for ePrint 2024/1037 Equations (16) and (17): trace domain size {trace_domain_size}, distinct extension opening points {}",
+                    extension_query_points.len(),
+                );
+            }
+        }
+
         let (mut inner_opened_values, inner_proof) =
             self.inner
                 .open_with_preprocessing(rounds, challenger, is_preprocessing);
@@ -537,6 +622,30 @@ mod tests {
     const NUM_RANDOM_CODEWORDS: usize = 2;
 
     #[test]
+    fn lagrange_quotient_hiding_query_bounds_match_source_equations() {
+        // BabyBear's standard challenge extension has e = 4. With one Q_F
+        // query and two FRI Q_D queries, Equation (17) requires 12 degrees of
+        // witness-randomizer freedom.
+        assert!(!lagrange_quotient_hiding_query_bounds_are_satisfied(
+            8, 4, 1, 2
+        ));
+        assert!(lagrange_quotient_hiding_query_bounds_are_satisfied(
+            16, 4, 1, 2
+        ));
+        assert!(!lagrange_quotient_hiding_query_bounds_are_satisfied(
+            16, 4, 1, 8
+        ));
+
+        // Overflow must not wrap a huge, invalid query budget into acceptance.
+        assert!(!lagrange_quotient_hiding_query_bounds_are_satisfied(
+            usize::MAX,
+            usize::MAX,
+            2,
+            1
+        ));
+    }
+
+    #[test]
     fn quotient_randomizer_balance_preserves_recomposition() {
         let domain = Domain::new(Val::GENERATOR, 4).unwrap();
 
@@ -580,6 +689,12 @@ mod tests {
     ///
     /// Each test perturbs one level to trip the matching count check.
     fn make_fixture() -> (MyPcs, Vec<(Commitment, Claims)>, Proof, Challenger) {
+        make_fixture_with_log_degree(4)
+    }
+
+    fn make_fixture_with_log_degree(
+        log_degree: usize,
+    ) -> (MyPcs, Vec<(Commitment, Claims)>, Proof, Challenger) {
         // Fixed seeds keep the roundtrip deterministic.
         let mut rng = SmallRng::seed_from_u64(1);
 
@@ -612,7 +727,6 @@ mod tests {
 
         // The wrapper interleaves the trace with random rows, doubling its
         // height, so (like the zk prover) we commit against a `2 * height` domain.
-        let log_degree = 3;
         let width = 4;
         let domain =
             <MyPcs as Pcs<Challenge, Challenger>>::natural_domain_for_degree(&pcs, 2 << log_degree);
@@ -643,6 +757,12 @@ mod tests {
         )];
 
         (pcs, claims, proof, v_challenger)
+    }
+
+    #[test]
+    #[should_panic(expected = "ePrint 2024/1037 Equations (16) and (17)")]
+    fn direct_pcs_open_rejects_underprovisioned_query_capacity() {
+        let _ = make_fixture_with_log_degree(3);
     }
 
     /// Verify with fully qualified syntax so the type parameters are unambiguous.

@@ -132,6 +132,17 @@ where
 
     // Collect per-instance degree information.
     let degrees: Vec<usize> = instances.iter().map(|i| i.trace.height()).collect();
+    if SC::Pcs::ZK {
+        // The batch shares one extension-field challenge zeta, so every
+        // instance must independently have enough randomizer degree for one
+        // Q_F query and the configured FRI domain queries.
+        for &degree in &degrees {
+            assert!(
+                pcs.zk_query_bounds_are_satisfied(degree, 1),
+                "ZK randomizer degree is insufficient for ePrint 2024/1037 Equations (16) and (17): trace domain size {degree}"
+            );
+        }
+    }
     let log_degrees: Vec<usize> = degrees.iter().copied().map(log2_strict_usize).collect();
     // Extended degree accounts for the ZK blinding factor (2x when ZK is enabled).
     let log_ext_degrees: Vec<usize> = log_degrees.iter().map(|&d| d + config.is_zk()).collect();
