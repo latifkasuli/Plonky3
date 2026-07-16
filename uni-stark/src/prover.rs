@@ -264,14 +264,16 @@ where
         .in_scope(|| pcs.commit_quotient(quotient_domain, quotient_flat, num_quotient_chunks));
     challenger.observe(quotient_commit.clone());
 
-    // If zk is enabled, we generate random extension field values of the size of the randomized trace. If `n` is the degree of the initial trace,
-    // then the randomized trace has degree `2n`. To randomize the FRI batch polynomial, we then need an extension field random polynomial of degree `2n -1`.
-    // So we can generate a random polynomial of degree `2n`, and provide it to `open` as is.
-    // Then the method will add `(R(X) - R(z)) / (X - z)` (which is of the desired degree `2n - 1`), to the batch of polynomials.
-    // Since we need a random polynomial defined over the extension field, and the `commit` method is over the base field,
-    // we actually need to commit to `SC::Challenge::D` base field random polynomials.
-    // This is similar to what is done for the quotient polynomials.
-    // TODO: This approach is only statistically zk. To make it perfectly zk, `R` would have to truly be an extension field polynomial.
+    // If ZK is enabled, the hiding PCS samples the Protocol-2 mask polynomial
+    // `R(X)` coefficientwise in `SC::Challenge::D` base-field coordinates. For
+    // trace size `n` and `h=n`, ePrint 2024/1037 requires
+    // `R in F[X]^{<2n-1}`; after reduction at `zeta`,
+    // `(R(X)-R(zeta))/(X-zeta)` has degree `<2n-2`.
+    //
+    // Base-field coordinate sampling represents an extension-field polynomial,
+    // but the runtime uses a computational RNG. The ideal independent-uniform
+    // sampler, commitment-hiding reduction, and Fiat-Shamir simulator transfer
+    // remain separate proof obligations.
     let (opt_r_commit, opt_r_data) = if SC::Pcs::ZK {
         let (r_commit, r_data) = pcs
             .get_opt_randomization_poly_commitment(core::iter::once(ext_trace_domain))

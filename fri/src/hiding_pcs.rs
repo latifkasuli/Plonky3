@@ -28,6 +28,7 @@ pub struct HidingFriPcs<Val, Dft, InputMmcs, FriMmcs, R: CryptoRng> {
     num_random_codewords: usize,
     rng: Mutex<R>,
     quotient_degree_reports: Mutex<Vec<LagrangeQuotientHidingDegreeReport>>,
+    mask_degree_reports: Mutex<Vec<FriMaskPolynomialDegreeReport>>,
 }
 
 /// Check the Lagrange-quotient hiding capacity from ePrint 2024/1037,
@@ -78,6 +79,49 @@ pub struct LagrangeQuotientHidingDegreeReport {
     pub implemented_randomized_chunk_degree_bound_exclusive: usize,
     pub source_nonfinal_chunk_degree_bound_exclusive: usize,
     pub source_final_chunk_degree_bound_exclusive: usize,
+}
+
+/// Exact degree bookkeeping for the Protocol-2 mask polynomial from
+/// ePrint 2024/1037 under the implementation choice `h = |H|`.
+///
+/// The source samples `R(X)` from `F[X]^{<|H| + h - 1}`. Therefore, when
+/// `h = |H|`, the mask has degree bound `<2|H|-1`, and its DEEP quotient
+/// `(R(X)-R(z))/(X-z)` has degree bound `<2|H|-2`. The implementation samples
+/// every extension-field coordinate in this exact coefficient range before
+/// evaluating and committing it.
+///
+/// This report establishes degree and coordinate shape only. It does not turn
+/// a computational RNG into the source's ideal uniform sampler or establish
+/// commitment hiding, Fiat-Shamir simulation, or zero knowledge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FriMaskPolynomialDegreeReport {
+    pub trace_domain_size: usize,
+    pub extension_coordinate_count: usize,
+    pub implemented_mask_degree_bound_exclusive: usize,
+    pub source_mask_degree_bound_exclusive: usize,
+    pub implemented_reduced_mask_degree_bound_exclusive: usize,
+    pub source_reduced_mask_degree_bound_exclusive: usize,
+}
+
+pub fn fri_mask_polynomial_degree_report(
+    trace_domain_size: usize,
+    extension_coordinate_count: usize,
+) -> Option<FriMaskPolynomialDegreeReport> {
+    if trace_domain_size < 2 || extension_coordinate_count == 0 {
+        return None;
+    }
+    let extended_trace_size = trace_domain_size.checked_mul(2)?;
+    let mask_degree_bound = extended_trace_size.checked_sub(1)?;
+    let reduced_mask_degree_bound = mask_degree_bound.checked_sub(1)?;
+
+    Some(FriMaskPolynomialDegreeReport {
+        trace_domain_size,
+        extension_coordinate_count,
+        implemented_mask_degree_bound_exclusive: mask_degree_bound,
+        source_mask_degree_bound_exclusive: mask_degree_bound,
+        implemented_reduced_mask_degree_bound_exclusive: reduced_mask_degree_bound,
+        source_reduced_mask_degree_bound_exclusive: reduced_mask_degree_bound,
+    })
 }
 
 pub fn lagrange_quotient_hiding_degree_report(
@@ -131,6 +175,7 @@ where
             num_random_codewords: self.num_random_codewords,
             rng: Mutex::new(R::from_rng(&mut *self.rng.lock())),
             quotient_degree_reports: Mutex::new(self.quotient_degree_reports.lock().clone()),
+            mask_degree_reports: Mutex::new(self.mask_degree_reports.lock().clone()),
         }
     }
 }
@@ -149,6 +194,7 @@ impl<Val, Dft, InputMmcs, FriMmcs, R: CryptoRng> HidingFriPcs<Val, Dft, InputMmc
             num_random_codewords,
             rng: Mutex::new(rng),
             quotient_degree_reports: Mutex::new(Vec::new()),
+            mask_degree_reports: Mutex::new(Vec::new()),
         }
     }
 
@@ -158,6 +204,14 @@ impl<Val, Dft, InputMmcs, FriMmcs, R: CryptoRng> HidingFriPcs<Val, Dft, InputMmc
     /// does not attest to the RNG's seed source or establish the source paper's simulator claim.
     pub fn quotient_degree_reports(&self) -> Vec<LagrangeQuotientHidingDegreeReport> {
         self.quotient_degree_reports.lock().clone()
+    }
+
+    /// Return degree reports recorded by actual Protocol-2 mask commitments.
+    ///
+    /// This is source-correspondence evidence for the concrete execution. It is
+    /// not a simulator proof and does not establish ideal randomness or ZK.
+    pub fn mask_degree_reports(&self) -> Vec<FriMaskPolynomialDegreeReport> {
+        self.mask_degree_reports.lock().clone()
     }
 }
 
@@ -640,15 +694,39 @@ where
         let random_input_vals = ext_trace_domains
             .into_iter()
             .map(|domain| {
-                let m = DenseMatrix::rand(
-                    &mut *self.rng.lock(),
-                    domain.size(),
-                    self.num_random_codewords + Challenge::DIMENSION,
-                );
+                let extended_trace_size = domain.size();
+                if extended_trace_size % 2 != 0 {
+                    return None;
+                }
+                let report = fri_mask_polynomial_degree_report(
+                    extended_trace_size / 2,
+                    Challenge::DIMENSION,
+                )?;
+                let width = self
+                    .num_random_codewords
+                    .checked_add(Challenge::DIMENSION)?;
 
-                (domain, m)
+                // Sample coefficients, not an arbitrary full-domain evaluation
+                // vector. The final coefficient remains zero, so every coordinate
+                // polynomial is in F[X]^{<2|H|-1}, exactly as in Protocol 2.
+                let mut coefficients = DenseMatrix::rand(
+                    &mut *self.rng.lock(),
+                    report.implemented_mask_degree_bound_exclusive,
+                    width,
+                );
+                coefficients
+                    .values
+                    .resize(extended_trace_size.checked_mul(width)?, Val::ZERO);
+                let evaluations = self
+                    .inner
+                    .dft
+                    .coset_dft_batch(coefficients, domain.shift())
+                    .to_row_major_matrix();
+                self.mask_degree_reports.lock().push(report);
+
+                Some((domain, evaluations))
             })
-            .collect::<Vec<_>>();
+            .collect::<Option<Vec<_>>>()?;
 
         let r_commit_and_data =
             Pcs::<Challenge, Challenger>::commit(&self.inner, random_input_vals);
@@ -670,6 +748,35 @@ where
     }
 }
 
+/// Complete one idealized Lagrange-quotient simulator opening.
+///
+/// The caller supplies the first `d-1` component values as independent uniform
+/// samples. This function solves the final component so that
+/// `sum_i selectors[i] * q_i = overall_quotient`, matching the explicit
+/// simulator in ePrint 2024/1037, Theorem 8, at one queried point.
+///
+/// This is only the quotient query-value layer. Polynomial interpolation and
+/// query-capacity hypotheses, ideal uniform sampling, the Protocol-2/FRI
+/// transcript, commitments, and Fiat-Shamir require separate checks.
+pub fn complete_lagrange_quotient_simulator_opening<F: Field>(
+    selectors: &[F],
+    overall_quotient: F,
+    sampled_nonfinal_components: &[F],
+) -> Option<Vec<F>> {
+    if selectors.len() < 2 || sampled_nonfinal_components.len() + 1 != selectors.len() {
+        return None;
+    }
+    let mut components = sampled_nonfinal_components.to_vec();
+    components.push(F::ZERO);
+    complete_last_selector_weighted_component(
+        selectors,
+        1,
+        &mut components,
+        Some(core::slice::from_ref(&overall_quotient)),
+    )?;
+    Some(components)
+}
+
 /// Fill the final quotient randomizer so the selector-weighted sum is zero.
 ///
 /// If `c_i` are the quotient selector normalizers, this enforces
@@ -680,21 +787,39 @@ fn balance_quotient_randomizers<F: Field>(
     values_per_chunk: usize,
     randomizers: &mut [F],
 ) -> Option<()> {
-    if normalizers.len() < 2
-        || values_per_chunk == 0
-        || normalizers.len().checked_mul(values_per_chunk) != Some(randomizers.len())
+    complete_last_selector_weighted_component(normalizers, values_per_chunk, randomizers, None)
+}
+
+/// Solve the final component of a selector-weighted system pointwise.
+///
+/// `targets = None` means an all-zero target, which is the honest prover's
+/// quotient-randomizer balance. A supplied target is the query-level simulator
+/// path. Keeping both paths on this one solver prevents their algebra from
+/// drifting apart.
+fn complete_last_selector_weighted_component<F: Field>(
+    selectors: &[F],
+    values_per_component: usize,
+    values: &mut [F],
+    targets: Option<&[F]>,
+) -> Option<()> {
+    if selectors.len() < 2
+        || values_per_component == 0
+        || selectors.len().checked_mul(values_per_component) != Some(values.len())
+        || targets.is_some_and(|items| items.len() != values_per_component)
     {
         return None;
     }
 
-    let last_chunk = normalizers.len() - 1;
-    let last_normalizer_inv = normalizers[last_chunk].try_inverse()?;
-    for chunk in 0..last_chunk {
-        let multiplier = normalizers[chunk] * last_normalizer_inv;
-        for offset in 0..values_per_chunk {
-            let value = randomizers[chunk * values_per_chunk + offset] * multiplier;
-            randomizers[last_chunk * values_per_chunk + offset] -= value;
+    let last_component = selectors.len() - 1;
+    let last_selector_inv = selectors[last_component].try_inverse()?;
+    for offset in 0..values_per_component {
+        let mut partial = F::ZERO;
+        for component in 0..last_component {
+            partial += selectors[component] * values[component * values_per_component + offset];
         }
+        let target = targets.map_or(F::ZERO, |items| items[offset]);
+        values[last_component * values_per_component + offset] =
+            (target - partial) * last_selector_inv;
     }
 
     Some(())
@@ -793,6 +918,64 @@ mod tests {
         assert!(lagrange_quotient_hiding_degree_report(16, 1).is_none());
         assert!(lagrange_quotient_hiding_degree_report(usize::MAX, 2).is_none());
         assert!(lagrange_quotient_hiding_degree_report(16, usize::MAX).is_none());
+    }
+
+    #[test]
+    fn fri_mask_polynomial_degree_report_matches_protocol_two() {
+        let report =
+            fri_mask_polynomial_degree_report(16, 4).expect("valid Protocol-2 mask regime");
+        assert_eq!(report.trace_domain_size, 16);
+        assert_eq!(report.extension_coordinate_count, 4);
+        assert_eq!(report.implemented_mask_degree_bound_exclusive, 31);
+        assert_eq!(report.source_mask_degree_bound_exclusive, 31);
+        assert_eq!(report.implemented_reduced_mask_degree_bound_exclusive, 30);
+        assert_eq!(report.source_reduced_mask_degree_bound_exclusive, 30);
+
+        assert!(fri_mask_polynomial_degree_report(0, 4).is_none());
+        assert!(fri_mask_polynomial_degree_report(1, 4).is_none());
+        assert!(fri_mask_polynomial_degree_report(16, 0).is_none());
+        assert!(fri_mask_polynomial_degree_report(usize::MAX, 4).is_none());
+    }
+
+    #[test]
+    fn ideal_quotient_simulator_completes_exact_target() {
+        for component_count in [2, 4, 8] {
+            let selectors = (0..component_count)
+                .map(|index| Val::from_usize(index * index + 2))
+                .collect_vec();
+            let sampled = (0..component_count - 1)
+                .map(|index| Val::from_usize(5 * index + 11))
+                .collect_vec();
+            let target = Val::from_u32(424_242);
+            let components =
+                complete_lagrange_quotient_simulator_opening(&selectors, target, &sampled)
+                    .expect("nonzero final selector and valid shape");
+
+            assert_eq!(&components[..component_count - 1], sampled.as_slice());
+            assert_eq!(
+                selectors
+                    .iter()
+                    .zip(&components)
+                    .map(|(selector, value)| *selector * *value)
+                    .sum::<Val>(),
+                target,
+                "failed for {component_count} components"
+            );
+        }
+
+        assert!(complete_lagrange_quotient_simulator_opening::<Val>(&[], Val::ONE, &[]).is_none());
+        assert!(
+            complete_lagrange_quotient_simulator_opening(&[Val::ONE, Val::ONE], Val::ONE, &[],)
+                .is_none()
+        );
+        assert!(
+            complete_lagrange_quotient_simulator_opening(
+                &[Val::ONE, Val::ZERO],
+                Val::ONE,
+                &[Val::ONE],
+            )
+            .is_none()
+        );
     }
 
     #[test]

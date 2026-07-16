@@ -133,5 +133,22 @@ fn main() -> Result<(), impl Debug> {
         report.source_final_chunk_degree_bound_exclusive,
     );
 
+    let mask_degree_reports = config.pcs().mask_degree_reports();
+    assert_eq!(
+        mask_degree_reports.len(),
+        1,
+        "the concrete example must execute exactly one Protocol-2 mask commitment"
+    );
+    let mask_report = mask_degree_reports[0];
+    println!(
+        "P3_FRI_ZK_SIMULATOR_RUNTIME_V0 proof_verified=true quotient_query_simulator=selector_weighted_final_component witness_mask_model=disjoint_coset_interpolation fri_mask_model=protocol2_extension_polynomial trace_domain_size={} extension_coordinate_count={} implemented_mask_degree_bound_exclusive={} source_mask_degree_bound_exclusive={} implemented_reduced_mask_degree_bound_exclusive={} source_reduced_mask_degree_bound_exclusive={} runtime_perfect_uniformity_established=false commitment_hiding_reduction_established=false fiat_shamir_transfer_established=false zero_knowledge_established=false",
+        mask_report.trace_domain_size,
+        mask_report.extension_coordinate_count,
+        mask_report.implemented_mask_degree_bound_exclusive,
+        mask_report.source_mask_degree_bound_exclusive,
+        mask_report.implemented_reduced_mask_degree_bound_exclusive,
+        mask_report.source_reduced_mask_degree_bound_exclusive,
+    );
+
     Ok::<(), &'static str>(())
 }
