@@ -42,6 +42,8 @@ const NUM_ROWS: usize = 1 << 16;
 const VECTOR_LEN: usize = 1 << 3;
 const NUM_PERMUTATIONS: usize = NUM_ROWS * VECTOR_LEN;
 
+type Val = BabyBear;
+type Challenge = BinomialExtensionField<Val, 4>;
 type Dft = p3_dft::Radix2DitParallel<BabyBear>;
 
 fn main() -> Result<(), impl Debug> {
@@ -53,9 +55,6 @@ fn main() -> Result<(), impl Debug> {
         .with(env_filter)
         .with(ForestLayer::default())
         .init();
-
-    type Val = BabyBear;
-    type Challenge = BinomialExtensionField<Val, 4>;
 
     type ByteHash = Keccak256Hash;
     let byte_hash = ByteHash {};
@@ -167,12 +166,16 @@ fn main() -> Result<(), impl Debug> {
         rbr_degree_report.full_rbr_transfer_established,
     );
 
-    // `uni-stark` symbolically evaluates this AIR over the base field, then
-    // lifts the discovered global layout into the challenge field when it
-    // decomposes alpha. Recompute that exact layout rather than inventing a
-    // second constraint count for the assurance record.
+    // Match quotient_values' SymbolicAirBuilder<Val> instantiation exactly.
+    // The resulting layout is later lifted into Challenge when alpha powers
+    // are decomposed by the prover.
     let constraint_layout =
         get_constraint_layout::<Val, Val, _>(&air, AirLayout::from_air::<Val>(&air));
+    assert_eq!(
+        constraint_layout.total_constraints(),
+        2256,
+        "the concrete Poseidon2 AIR constraint count changed"
+    );
     let mut global_indices = constraint_layout.base_indices.clone();
     global_indices.extend_from_slice(&constraint_layout.ext_indices);
     global_indices.sort_unstable();
@@ -222,4 +225,30 @@ fn main() -> Result<(), impl Debug> {
     );
 
     Ok::<(), &'static str>(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concrete_poseidon2_air_has_2256_prover_layout_constraints() {
+        let mut rng = SmallRng::seed_from_u64(1);
+        let constants = RoundConstants::from_rng(&mut rng);
+        let air: VectorizedPoseidon2Air<
+            Val,
+            GenericPoseidon2LinearLayersBabyBear,
+            WIDTH,
+            SBOX_DEGREE,
+            SBOX_REGISTERS,
+            HALF_FULL_ROUNDS,
+            PARTIAL_ROUNDS,
+            VECTOR_LEN,
+        > = VectorizedPoseidon2Air::new(constants);
+
+        let constraint_layout =
+            get_constraint_layout::<Val, Val, _>(&air, AirLayout::from_air::<Val>(&air));
+
+        assert_eq!(constraint_layout.total_constraints(), 2256);
+    }
 }
