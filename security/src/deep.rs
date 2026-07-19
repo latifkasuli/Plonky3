@@ -72,9 +72,11 @@ pub struct DeepAliRoundTwoParams {
 /// use the honest prover's zero-balance relation: RbR list candidates are
 /// arbitrary low-degree codewords and cannot be assumed to satisfy it.
 ///
-/// The source-style parameter translation uses `k=2N`, `k+=k+2`, `ell=h`,
-/// and `f=d`.  The older `k=N`, `k+=N+2` translation is retained in the
-/// report only as a checked negative control.  A successful report proves
+/// The source-style parameter translation for this hiding (`beta=2`) regime
+/// uses `k=2N`, `k+=k+2`, `ell=h`, and `f=d`.  The `k=N`, `k+=N+2`
+/// translation is retained in the report only as a checked negative control
+/// for this regime; it remains the source translation for a non-hiding
+/// `beta=1` regime outside this function's scope.  A successful report proves
 /// this degree-envelope lemma; it does not establish the source theorem's
 /// list-size regime, constraint-combination reduction, state-function
 /// correspondence, or full RbR soundness.
@@ -450,6 +452,21 @@ mod source_tests {
     }
 
     #[test]
+    fn full_field_correction_charges_live_shape_accepted_forbidden_points() {
+        let params = params();
+        let rejected_trace_size = 1 << 16;
+        let selected = deep_ali_selected_degree_numerator(&air(), &params, 1.0).unwrap();
+        let accepted_forbidden =
+            BigUint::from(params.evaluation_trace_domain_union_size - rejected_trace_size);
+        let corrected_numerator = &selected + &accepted_forbidden;
+
+        let result = deep_ali_full_field_error_udr(&air(), &params, rejected_trace_size).unwrap();
+        let expected = log2_biguint_lower_bound(&params.field_cardinality)
+            - log2_biguint_upper_bound(&corrected_numerator);
+        assert_eq!(result.bits(), expected);
+    }
+
+    #[test]
     fn full_field_list_decoding_uses_a_directional_quadratic_envelope() {
         let params = params();
         let rejected_trace_size = 1 << 16;
@@ -498,6 +515,10 @@ mod source_tests {
             report.source_candidate_recomposition_degree_bound_exclusive,
             (9 << 16) + 2
         );
+        assert_eq!(
+            report.legacy_candidate_recomposition_degree_bound_exclusive,
+            524_290
+        );
         assert!(!report.legacy_mapping_sufficient);
         assert!(report.corrected_mapping_sufficient);
         assert!(!report.arbitrary_candidate_balance_assumed);
@@ -529,6 +550,9 @@ mod source_tests {
     #[test]
     fn lagrange_coset_degree_transfer_fails_closed_on_other_shapes_and_overflow() {
         assert!(lagrange_coset_rbr_degree_report(0, 0, 2).is_none());
+        // At N=h=2 the legacy beta=1 envelope covers the candidate bound, so
+        // this beta=2 refutation checker must refuse the shape.
+        assert!(lagrange_coset_rbr_degree_report(2, 2, 2).is_none());
         assert!(lagrange_coset_rbr_degree_report(4, 2, 2).is_none());
         assert!(lagrange_coset_rbr_degree_report(4, 4, 1).is_none());
         assert!(lagrange_coset_rbr_degree_report(usize::MAX, usize::MAX, 2).is_none());
