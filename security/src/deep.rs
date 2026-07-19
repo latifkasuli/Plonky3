@@ -60,6 +60,116 @@ pub struct DeepAliRoundTwoParams {
     pub quotient_segment_degree_bound: usize,
 }
 
+/// Exact degree bookkeeping for transferring the DEEP-ALI round-two
+/// distinct-polynomial argument to disjoint-coset Lagrange selectors.
+///
+/// For `d` disjoint quotient domains of common size `h`, every selector
+///
+/// `L_i(X) = c_i * product_{j != i} Z_{H_j}(X)`
+///
+/// has degree `(d - 1)h`.  Consequently, arbitrary candidate chunks of
+/// degree `<2h` recompose to degree `<(d + 1)h`.  This calculation does not
+/// use the honest prover's zero-balance relation: RbR list candidates are
+/// arbitrary low-degree codewords and cannot be assumed to satisfy it.
+///
+/// The source-style parameter translation uses `k=2N`, `k+=k+2`, `ell=h`,
+/// and `f=d`.  The older `k=N`, `k+=N+2` translation is retained in the
+/// report only as a checked negative control.  A successful report proves
+/// this degree-envelope lemma; it does not establish the source theorem's
+/// list-size regime, constraint-combination reduction, state-function
+/// correspondence, or full RbR soundness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LagrangeCosetRbrDegreeReport {
+    pub trace_domain_size: usize,
+    pub quotient_chunk_domain_size: usize,
+    pub quotient_chunk_count: usize,
+    pub randomized_trace_degree_bound_exclusive: usize,
+    pub randomized_chunk_degree_bound_exclusive: usize,
+    pub selector_degree: usize,
+    pub candidate_recomposition_degree_bound_exclusive: usize,
+    pub source_low_degree_bound_k: usize,
+    pub source_expanded_low_degree_bound_k_plus: usize,
+    pub source_quotient_segment_count_f: usize,
+    pub source_quotient_segment_length_ell: usize,
+    pub source_candidate_recomposition_degree_bound_exclusive: usize,
+    pub legacy_source_low_degree_bound_k: usize,
+    pub legacy_source_expanded_low_degree_bound_k_plus: usize,
+    pub legacy_candidate_recomposition_degree_bound_exclusive: usize,
+    pub legacy_mapping_sufficient: bool,
+    pub corrected_mapping_sufficient: bool,
+    pub arbitrary_candidate_balance_assumed: bool,
+    pub full_rbr_transfer_established: bool,
+}
+
+/// Build the checked Lagrange/coset degree-transfer report.
+///
+/// The concrete hiding construction currently uses equal quotient cosets with
+/// `h=N` and randomizes both trace and quotient polynomials to degree `<2N`.
+/// Shapes outside that exact regime fail closed instead of being silently
+/// translated into the source theorem.
+pub fn lagrange_coset_rbr_degree_report(
+    trace_domain_size: usize,
+    quotient_chunk_domain_size: usize,
+    quotient_chunk_count: usize,
+) -> Option<LagrangeCosetRbrDegreeReport> {
+    if trace_domain_size < 2
+        || quotient_chunk_domain_size != trace_domain_size
+        || quotient_chunk_count <= 1
+    {
+        return None;
+    }
+
+    let randomized_trace_degree_bound_exclusive = trace_domain_size.checked_mul(2)?;
+    let randomized_chunk_degree_bound_exclusive = quotient_chunk_domain_size.checked_mul(2)?;
+    let selector_degree = quotient_chunk_count
+        .checked_sub(1)?
+        .checked_mul(quotient_chunk_domain_size)?;
+    let candidate_recomposition_degree_bound_exclusive =
+        selector_degree.checked_add(randomized_chunk_degree_bound_exclusive)?;
+
+    let source_low_degree_bound_k = randomized_trace_degree_bound_exclusive;
+    let source_expanded_low_degree_bound_k_plus = source_low_degree_bound_k.checked_add(2)?;
+    let source_quotient_segment_count_f = quotient_chunk_count;
+    let source_quotient_segment_length_ell = quotient_chunk_domain_size;
+    let source_candidate_recomposition_degree_bound_exclusive =
+        selector_degree.checked_add(source_expanded_low_degree_bound_k_plus)?;
+
+    let legacy_source_low_degree_bound_k = trace_domain_size;
+    let legacy_source_expanded_low_degree_bound_k_plus = trace_domain_size.checked_add(2)?;
+    let legacy_candidate_recomposition_degree_bound_exclusive =
+        selector_degree.checked_add(legacy_source_expanded_low_degree_bound_k_plus)?;
+
+    let corrected_mapping_sufficient = candidate_recomposition_degree_bound_exclusive
+        <= source_candidate_recomposition_degree_bound_exclusive;
+    let legacy_mapping_sufficient = candidate_recomposition_degree_bound_exclusive
+        <= legacy_candidate_recomposition_degree_bound_exclusive;
+    if !corrected_mapping_sufficient || legacy_mapping_sufficient {
+        return None;
+    }
+
+    Some(LagrangeCosetRbrDegreeReport {
+        trace_domain_size,
+        quotient_chunk_domain_size,
+        quotient_chunk_count,
+        randomized_trace_degree_bound_exclusive,
+        randomized_chunk_degree_bound_exclusive,
+        selector_degree,
+        candidate_recomposition_degree_bound_exclusive,
+        source_low_degree_bound_k,
+        source_expanded_low_degree_bound_k_plus,
+        source_quotient_segment_count_f,
+        source_quotient_segment_length_ell,
+        source_candidate_recomposition_degree_bound_exclusive,
+        legacy_source_low_degree_bound_k,
+        legacy_source_expanded_low_degree_bound_k_plus,
+        legacy_candidate_recomposition_degree_bound_exclusive,
+        legacy_mapping_sufficient,
+        corrected_mapping_sufficient,
+        arbitrary_candidate_balance_assumed: false,
+        full_rbr_transfer_established: false,
+    })
+}
+
 /// Source-form DEEP-ALI round-two error in the unique-decoding regime
 /// ([2024/1553] Theorem 3).
 ///
@@ -365,6 +475,63 @@ mod source_tests {
         invalid.field_cardinality = BigUint::from(union_size);
         assert!(deep_ali_full_field_error_udr(&air(), &invalid, 1 << 16).is_none());
         assert!(deep_ali_full_field_error_ldr(&air(), &params(), 1 << 16, f64::NAN).is_none());
+    }
+
+    #[test]
+    fn lagrange_coset_degree_transfer_matches_the_concrete_zk_shape() {
+        let report = lagrange_coset_rbr_degree_report(1 << 16, 1 << 16, 8).unwrap();
+        assert_eq!(report.randomized_trace_degree_bound_exclusive, 1 << 17);
+        assert_eq!(report.randomized_chunk_degree_bound_exclusive, 1 << 17);
+        assert_eq!(report.selector_degree, 7 << 16);
+        assert_eq!(
+            report.candidate_recomposition_degree_bound_exclusive,
+            9 << 16
+        );
+        assert_eq!(report.source_low_degree_bound_k, 1 << 17);
+        assert_eq!(
+            report.source_expanded_low_degree_bound_k_plus,
+            (1 << 17) + 2
+        );
+        assert_eq!(report.source_quotient_segment_count_f, 8);
+        assert_eq!(report.source_quotient_segment_length_ell, 1 << 16);
+        assert_eq!(
+            report.source_candidate_recomposition_degree_bound_exclusive,
+            (9 << 16) + 2
+        );
+        assert!(!report.legacy_mapping_sufficient);
+        assert!(report.corrected_mapping_sufficient);
+        assert!(!report.arbitrary_candidate_balance_assumed);
+        assert!(!report.full_rbr_transfer_established);
+    }
+
+    #[test]
+    fn legacy_n_plus_two_mapping_underbounds_arbitrary_candidates() {
+        let report = lagrange_coset_rbr_degree_report(4, 4, 2).unwrap();
+        // A selector has degree 4 and a candidate chunk may have degree 7,
+        // so the recomposition may have degree 11 (exclusive bound 12).
+        assert_eq!(report.selector_degree, 4);
+        assert_eq!(report.candidate_recomposition_degree_bound_exclusive, 12);
+        // The legacy k=N, k+=N+2 envelope has degree at most 9
+        // (exclusive bound 10), so it cannot justify the candidate class.
+        assert_eq!(
+            report.legacy_candidate_recomposition_degree_bound_exclusive,
+            10
+        );
+        assert!(!report.legacy_mapping_sufficient);
+        // The corrected k=2N, k+=2N+2 envelope is conservative.
+        assert_eq!(
+            report.source_candidate_recomposition_degree_bound_exclusive,
+            14
+        );
+        assert!(report.corrected_mapping_sufficient);
+    }
+
+    #[test]
+    fn lagrange_coset_degree_transfer_fails_closed_on_other_shapes_and_overflow() {
+        assert!(lagrange_coset_rbr_degree_report(0, 0, 2).is_none());
+        assert!(lagrange_coset_rbr_degree_report(4, 2, 2).is_none());
+        assert!(lagrange_coset_rbr_degree_report(4, 4, 1).is_none());
+        assert!(lagrange_coset_rbr_degree_report(usize::MAX, usize::MAX, 2).is_none());
     }
 
     #[test]

@@ -11,6 +11,7 @@ use p3_fri::{FriParameters, HidingFriPcs};
 use p3_keccak::{Keccak256Hash, KeccakF};
 use p3_merkle_tree::MerkleTreeHidingMmcs;
 use p3_poseidon2_air::{RoundConstants, VectorizedPoseidon2Air};
+use p3_security::deep::lagrange_coset_rbr_degree_report;
 use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher};
 use p3_uni_stark::{StarkConfig, StarkGenericConfig, prove, verify};
 use rand::SeedableRng;
@@ -131,6 +132,35 @@ fn main() -> Result<(), impl Debug> {
         report.implemented_randomized_chunk_degree_bound_exclusive,
         report.source_nonfinal_chunk_degree_bound_exclusive,
         report.source_final_chunk_degree_bound_exclusive,
+    );
+
+    let rbr_degree_report = lagrange_coset_rbr_degree_report(
+        NUM_ROWS,
+        report.quotient_chunk_domain_size,
+        report.quotient_chunk_count,
+    )
+    .expect("the concrete quotient shape must satisfy the checked RbR degree translation");
+    println!(
+        "P3_FRI_RBR_DEGREE_RUNTIME_V0 proof_verified=true trace_domain_size={} quotient_chunk_domain_size={} quotient_chunk_count={} randomized_trace_degree_bound_exclusive={} randomized_chunk_degree_bound_exclusive={} selector_degree={} candidate_recomposition_degree_bound_exclusive={} source_low_degree_bound_k={} source_expanded_low_degree_bound_k_plus={} source_quotient_segment_count_f={} source_quotient_segment_length_ell={} source_candidate_recomposition_degree_bound_exclusive={} legacy_source_low_degree_bound_k={} legacy_source_expanded_low_degree_bound_k_plus={} legacy_candidate_recomposition_degree_bound_exclusive={} legacy_mapping_sufficient={} corrected_mapping_sufficient={} arbitrary_candidate_balance_assumed={} constraint_combination_transfer_established=false list_size_regime_established=false state_function_correspondence_established=false full_rbr_transfer_established={}",
+        rbr_degree_report.trace_domain_size,
+        rbr_degree_report.quotient_chunk_domain_size,
+        rbr_degree_report.quotient_chunk_count,
+        rbr_degree_report.randomized_trace_degree_bound_exclusive,
+        rbr_degree_report.randomized_chunk_degree_bound_exclusive,
+        rbr_degree_report.selector_degree,
+        rbr_degree_report.candidate_recomposition_degree_bound_exclusive,
+        rbr_degree_report.source_low_degree_bound_k,
+        rbr_degree_report.source_expanded_low_degree_bound_k_plus,
+        rbr_degree_report.source_quotient_segment_count_f,
+        rbr_degree_report.source_quotient_segment_length_ell,
+        rbr_degree_report.source_candidate_recomposition_degree_bound_exclusive,
+        rbr_degree_report.legacy_source_low_degree_bound_k,
+        rbr_degree_report.legacy_source_expanded_low_degree_bound_k_plus,
+        rbr_degree_report.legacy_candidate_recomposition_degree_bound_exclusive,
+        rbr_degree_report.legacy_mapping_sufficient,
+        rbr_degree_report.corrected_mapping_sufficient,
+        rbr_degree_report.arbitrary_candidate_balance_assumed,
+        rbr_degree_report.full_rbr_transfer_established,
     );
 
     let mask_degree_reports = config.pcs().mask_degree_reports();
