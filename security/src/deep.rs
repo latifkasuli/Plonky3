@@ -309,25 +309,34 @@ mod source_tests {
     }
 
     #[test]
-    fn full_field_correction_charges_every_accepted_forbidden_point() {
-        let params = params();
-        let rejected_trace_size = 1 << 16;
-        let selected = deep_ali_selected_degree_numerator(&air(), &params, 1.0).unwrap();
-        let accepted_forbidden =
-            BigUint::from(params.evaluation_trace_domain_union_size - rejected_trace_size);
-        let corrected_numerator = &selected + &accepted_forbidden;
+    fn full_field_correction_matches_hand_computed_toy_partition() {
+        let toy_air = StarkAirParams {
+            num_constraints: 1,
+            max_constraint_degree: 2,
+            max_combo: 1,
+        };
+        let toy_params = DeepAliRoundTwoParams {
+            field_cardinality: BigUint::from(101u8),
+            evaluation_trace_domain_union_size: 11,
+            low_degree_bound: 2,
+            expanded_low_degree_bound: 3,
+            quotient_segment_count: 2,
+            quotient_segment_degree_bound: 2,
+        };
 
-        let result = deep_ali_full_field_error_udr(&air(), &params, rejected_trace_size).unwrap();
-        let expected = log2_biguint_lower_bound(&params.field_cardinality)
-            - log2_biguint_upper_bound(&corrected_numerator);
-        assert_eq!(result.bits(), expected);
-
-        // Exact partition identity:
-        //   bad/F + ((F-U)/F) * (A/(F-U)) = (bad+A)/F.
-        let good =
-            &params.field_cardinality - BigUint::from(params.evaluation_trace_domain_union_size);
-        let common_denominator_numerator = &accepted_forbidden * &good + &selected * &good;
-        assert_eq!(common_denominator_numerator, corrected_numerator * good);
+        // The two degree branches are 5 and 6, so A=6. Of the eleven source-
+        // excluded points, the verifier rejects three and pessimistically
+        // charges the other eight. The corrected exact error is therefore
+        // (6+8)/101 = 14/101. The directional integer-log envelope returns
+        // floor(log2(101))-ceil(log2(14)) = 6-4 = 2 bits.
+        let selected = deep_ali_selected_degree_numerator(&toy_air, &toy_params, 1.0).unwrap();
+        assert_eq!(selected, BigUint::from(6u8));
+        assert_eq!(
+            &selected + BigUint::from(11usize - 3usize),
+            BigUint::from(14u8)
+        );
+        let result = deep_ali_full_field_error_udr(&toy_air, &toy_params, 3).unwrap();
+        assert_eq!(result.bits(), 2.0);
     }
 
     #[test]
