@@ -15,7 +15,7 @@ use p3_poseidon2_air::{RoundConstants, VectorizedPoseidon2Air};
 use p3_security::air::single_alpha_constraint_combination_report;
 use p3_security::deep::lagrange_coset_rbr_degree_report;
 use p3_security::fri::best_ldr_m;
-use p3_security::proximity::exact_ldr_list_parameter_report;
+use p3_security::proximity::{exact_hiding_rbr_state_list_report, exact_ldr_list_parameter_report};
 use p3_security::{InstanceShape, StarkAirParams};
 use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher};
 use p3_uni_stark::{
@@ -272,6 +272,57 @@ fn main() -> Result<(), impl Debug> {
         mask_report.source_mask_degree_bound_exclusive,
         mask_report.implemented_reduced_mask_degree_bound_exclusive,
         mask_report.source_reduced_mask_degree_bound_exclusive,
+    );
+
+    let hiding_state_list_report = exact_hiding_rbr_state_list_report(
+        NUM_ROWS,
+        fri_security_regime.log_blowup,
+        3,
+        rbr_degree_report
+            .source_low_degree_bound_k
+            .checked_shl(fri_security_regime.log_blowup as u32)
+            .expect("the concrete hiding FRI domain must fit usize"),
+        rbr_degree_report.randomized_trace_degree_bound_exclusive,
+        rbr_degree_report.randomized_chunk_degree_bound_exclusive,
+        mask_report.implemented_mask_degree_bound_exclusive,
+        mask_report.implemented_reduced_mask_degree_bound_exclusive,
+        combination_report.num_constraints,
+    )
+    .expect("the concrete hiding FRI family must satisfy the source state/list regime");
+    println!(
+        "P3_FRI_RBR_HIDING_STATE_LIST_RUNTIME_V0 proof_verified=true trace_domain_size={} source_hiding_beta={} source_candidate_degree_bound={} fri_log_blowup={} fri_evaluation_domain_size={} source_rs_rate_numerator={} source_rs_rate_denominator={} proximity_m={} source_agreement_numerator={} source_agreement_denominator={} source_distance_radius_numerator={} source_distance_radius_denominator={} source_expanded_candidate_degree_bound={} eta_comparison_left={} eta_comparison_right={} eta_positive={} source_list_bound_numerator={} source_list_bound_denominator={} source_list_size_integer_bound={} randomized_trace_degree_bound_exclusive={} randomized_chunk_degree_bound_exclusive={} mask_degree_bound_exclusive={} reduced_mask_degree_bound_exclusive={} reduced_opening_degree_bound_exclusive={} constraint_count={} priced_constraint_list_union_numerator={} source_protocol2_function_family_shape_established={} common_rs_and_list_size_regime_established={} state_candidate_family_correspondence_established={} fiat_shamir_uniformity_established={} full_rbr_transfer_established={} zero_knowledge_established={}",
+        hiding_state_list_report.trace_domain_size,
+        hiding_state_list_report.source_hiding_beta,
+        hiding_state_list_report.source_candidate_degree_bound,
+        hiding_state_list_report.fri_log_blowup,
+        hiding_state_list_report.fri_evaluation_domain_size,
+        hiding_state_list_report.source_rs_rate_numerator,
+        hiding_state_list_report.source_rs_rate_denominator,
+        hiding_state_list_report.proximity_m,
+        hiding_state_list_report.source_agreement_numerator,
+        hiding_state_list_report.source_agreement_denominator,
+        hiding_state_list_report.source_distance_radius_numerator,
+        hiding_state_list_report.source_distance_radius_denominator,
+        hiding_state_list_report.source_expanded_candidate_degree_bound,
+        hiding_state_list_report.eta_comparison_left,
+        hiding_state_list_report.eta_comparison_right,
+        hiding_state_list_report.eta_positive,
+        hiding_state_list_report.source_list_bound_numerator,
+        hiding_state_list_report.source_list_bound_denominator,
+        hiding_state_list_report.source_list_size_integer_bound,
+        hiding_state_list_report.randomized_trace_degree_bound_exclusive,
+        hiding_state_list_report.randomized_chunk_degree_bound_exclusive,
+        hiding_state_list_report.mask_degree_bound_exclusive,
+        hiding_state_list_report.reduced_mask_degree_bound_exclusive,
+        hiding_state_list_report.reduced_opening_degree_bound_exclusive,
+        hiding_state_list_report.constraint_count,
+        hiding_state_list_report.priced_constraint_list_union_numerator,
+        hiding_state_list_report.source_protocol2_function_family_shape_established,
+        hiding_state_list_report.common_rs_and_list_size_regime_established,
+        hiding_state_list_report.state_candidate_family_correspondence_established,
+        hiding_state_list_report.fiat_shamir_uniformity_established,
+        hiding_state_list_report.full_rbr_transfer_established,
+        hiding_state_list_report.zero_knowledge_established,
     );
 
     Ok::<(), &'static str>(())
