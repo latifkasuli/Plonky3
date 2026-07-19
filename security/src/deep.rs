@@ -9,7 +9,12 @@
 //! second quotient-segment degree branch. Use
 //! [`deep_ali_round_two_error_ldr`] or [`deep_ali_round_two_error_udr`] for
 //! that arithmetic after separately establishing the implementation-to-source
-//! parameter correspondence.
+//! parameter correspondence. If the executed verifier samples from the full
+//! challenge field and rejects only the trace domain, use
+//! [`deep_ali_full_field_error_ldr`] or [`deep_ali_full_field_error_udr`] to
+//! add the accepted forbidden-point event. Those functions are conditional on
+//! an ideal uniform field challenge and do not establish Fiat-Shamir or the
+//! quotient-segment proof transfer.
 
 use core::cmp::max;
 
@@ -81,12 +86,107 @@ pub fn deep_ali_round_two_error_ldr(
     deep_ali_round_two_error(air, params, list_size, true)
 }
 
+/// Conservative DEEP-ALI round-two error for an ideal uniform full-field
+/// challenge in the unique-decoding regime.
+///
+/// The source theorem conditions on a challenge outside `D union H`. The
+/// executed verifier rejects challenges in `H`, but an accepted challenge in
+/// `(D union H) \\ H` is outside the theorem's sample space and is therefore
+/// charged pessimistically with failure probability one. On the remaining
+/// points, the source conditional error is weighted by their exact sampling
+/// probability. Algebraically, if the source numerator is `A`, the resulting
+/// bound is `(A + |D union H| - |H|) / |G|`.
+///
+/// This is a counting reduction only. It assumes an ideal uniform challenge
+/// over `G` and that the source theorem applies on `G \\ (D union H)`; it does
+/// not prove a Fiat-Shamir/ROM reduction or a quotient-segment correspondence.
+pub fn deep_ali_full_field_error_udr(
+    air: &StarkAirParams,
+    params: &DeepAliRoundTwoParams,
+    verifier_rejected_trace_domain_size: usize,
+) -> Option<ErrorBits> {
+    deep_ali_full_field_error(air, params, verifier_rejected_trace_domain_size, 1.0, false)
+}
+
+/// Conservative DEEP-ALI round-two error for an ideal uniform full-field
+/// challenge in the list-decoding regime.
+///
+/// This applies the theorem's quadratic list-size factor using the same
+/// directional power-of-two envelope as [`deep_ali_round_two_error_ldr`], then
+/// adds the accepted forbidden-point event. See
+/// [`deep_ali_full_field_error_udr`] for the reduction and its trust boundary.
+pub fn deep_ali_full_field_error_ldr(
+    air: &StarkAirParams,
+    params: &DeepAliRoundTwoParams,
+    verifier_rejected_trace_domain_size: usize,
+    list_size: f64,
+) -> Option<ErrorBits> {
+    deep_ali_full_field_error(
+        air,
+        params,
+        verifier_rejected_trace_domain_size,
+        list_size,
+        true,
+    )
+}
+
 fn deep_ali_round_two_error(
     air: &StarkAirParams,
     params: &DeepAliRoundTwoParams,
     list_size: f64,
     square_list_size: bool,
 ) -> Option<ErrorBits> {
+    let selected = deep_ali_selected_degree_numerator(air, params, list_size)?;
+    let excluded = BigUint::from(params.evaluation_trace_domain_union_size);
+    if params.field_cardinality <= excluded {
+        return None;
+    }
+    let denominator = &params.field_cardinality - excluded;
+
+    let list_power = if square_list_size { 2.0 } else { 0.0 };
+    let list_size_log_upper = ceil_log2_f64(list_size);
+    let rational_bits =
+        log2_biguint_lower_bound(&denominator) - log2_biguint_upper_bound(&selected);
+    let bits = rational_bits - list_power * list_size_log_upper;
+    Some(ErrorBits::from_log2(bits.max(0.0)))
+}
+
+fn deep_ali_full_field_error(
+    air: &StarkAirParams,
+    params: &DeepAliRoundTwoParams,
+    verifier_rejected_trace_domain_size: usize,
+    list_size: f64,
+    square_list_size: bool,
+) -> Option<ErrorBits> {
+    let selected = deep_ali_selected_degree_numerator(air, params, list_size)?;
+    if verifier_rejected_trace_domain_size > params.evaluation_trace_domain_union_size {
+        return None;
+    }
+
+    let excluded = BigUint::from(params.evaluation_trace_domain_union_size);
+    if params.field_cardinality <= excluded {
+        return None;
+    }
+    let accepted_forbidden = excluded - BigUint::from(verifier_rejected_trace_domain_size);
+    let list_power = if square_list_size {
+        (2.0 * ceil_log2_f64(list_size)) as usize
+    } else {
+        0
+    };
+    let corrected_numerator = (selected << list_power) + accepted_forbidden;
+    if corrected_numerator >= params.field_cardinality {
+        return Some(ErrorBits::from_log2(0.0));
+    }
+    let bits = log2_biguint_lower_bound(&params.field_cardinality)
+        - log2_biguint_upper_bound(&corrected_numerator);
+    Some(ErrorBits::from_log2(bits.max(0.0)))
+}
+
+fn deep_ali_selected_degree_numerator(
+    air: &StarkAirParams,
+    params: &DeepAliRoundTwoParams,
+    list_size: f64,
+) -> Option<BigUint> {
     if air.max_constraint_degree == 0
         || params.low_degree_bound == 0
         || params.expanded_low_degree_bound < params.low_degree_bound
@@ -98,12 +198,6 @@ fn deep_ali_round_two_error(
         return None;
     }
 
-    let excluded = BigUint::from(params.evaluation_trace_domain_union_size);
-    if params.field_cardinality <= excluded {
-        return None;
-    }
-    let denominator = &params.field_cardinality - excluded;
-
     let k = BigUint::from(params.low_degree_bound);
     let k_minus_one = BigUint::from(params.low_degree_bound - 1);
     let k_plus_minus_one = BigUint::from(params.expanded_low_degree_bound - 1);
@@ -112,14 +206,7 @@ fn deep_ali_round_two_error(
         + BigUint::from(params.quotient_segment_count - 1)
             * BigUint::from(params.quotient_segment_degree_bound)
         + k_plus_minus_one;
-    let selected = max(first_branch, second_branch);
-
-    let list_power = if square_list_size { 2.0 } else { 0.0 };
-    let list_size_log_upper = ceil_log2_f64(list_size);
-    let rational_bits =
-        log2_biguint_lower_bound(&denominator) - log2_biguint_upper_bound(&selected);
-    let bits = rational_bits - list_power * list_size_log_upper;
-    Some(ErrorBits::from_log2(bits.max(0.0)))
+    Some(max(first_branch, second_branch))
 }
 
 /// Exact integer lower bound on `log2(value)`.
@@ -219,6 +306,56 @@ mod source_tests {
         assert!(deep_ali_round_two_error_udr(&air(), &invalid).is_none());
 
         assert!(deep_ali_round_two_error_ldr(&air(), &params(), f64::NAN).is_none());
+    }
+
+    #[test]
+    fn full_field_correction_charges_every_accepted_forbidden_point() {
+        let params = params();
+        let rejected_trace_size = 1 << 16;
+        let selected = deep_ali_selected_degree_numerator(&air(), &params, 1.0).unwrap();
+        let accepted_forbidden =
+            BigUint::from(params.evaluation_trace_domain_union_size - rejected_trace_size);
+        let corrected_numerator = &selected + &accepted_forbidden;
+
+        let result = deep_ali_full_field_error_udr(&air(), &params, rejected_trace_size).unwrap();
+        let expected = log2_biguint_lower_bound(&params.field_cardinality)
+            - log2_biguint_upper_bound(&corrected_numerator);
+        assert_eq!(result.bits(), expected);
+
+        // Exact partition identity:
+        //   bad/F + ((F-U)/F) * (A/(F-U)) = (bad+A)/F.
+        let good =
+            &params.field_cardinality - BigUint::from(params.evaluation_trace_domain_union_size);
+        let common_denominator_numerator = &accepted_forbidden * &good + &selected * &good;
+        assert_eq!(common_denominator_numerator, corrected_numerator * good);
+    }
+
+    #[test]
+    fn full_field_list_decoding_uses_a_directional_quadratic_envelope() {
+        let params = params();
+        let rejected_trace_size = 1 << 16;
+        let list_size = 17.5;
+        let selected = deep_ali_selected_degree_numerator(&air(), &params, list_size).unwrap();
+        let accepted_forbidden =
+            BigUint::from(params.evaluation_trace_domain_union_size - rejected_trace_size);
+        let corrected_numerator = (selected << 10usize) + accepted_forbidden;
+
+        let result =
+            deep_ali_full_field_error_ldr(&air(), &params, rejected_trace_size, list_size).unwrap();
+        let expected = log2_biguint_lower_bound(&params.field_cardinality)
+            - log2_biguint_upper_bound(&corrected_numerator);
+        assert_eq!(result.bits(), expected);
+    }
+
+    #[test]
+    fn full_field_correction_fails_closed_on_impossible_set_sizes() {
+        let mut invalid = params();
+        let union_size = invalid.evaluation_trace_domain_union_size;
+        assert!(deep_ali_full_field_error_udr(&air(), &invalid, union_size + 1).is_none());
+
+        invalid.field_cardinality = BigUint::from(union_size);
+        assert!(deep_ali_full_field_error_udr(&air(), &invalid, 1 << 16).is_none());
+        assert!(deep_ali_full_field_error_ldr(&air(), &params(), 1 << 16, f64::NAN).is_none());
     }
 
     #[test]
