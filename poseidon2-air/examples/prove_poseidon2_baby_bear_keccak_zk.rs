@@ -6,14 +6,18 @@ use p3_baby_bear::{
 };
 use p3_challenger::{HashChallenger, SerializingChallenger32};
 use p3_commit::ExtensionMmcs;
+use p3_field::Field;
 use p3_field::extension::BinomialExtensionField;
 use p3_fri::{FriParameters, HidingFriPcs};
 use p3_keccak::{Keccak256Hash, KeccakF};
 use p3_merkle_tree::MerkleTreeHidingMmcs;
 use p3_poseidon2_air::{RoundConstants, VectorizedPoseidon2Air};
+use p3_security::air::single_alpha_constraint_combination_report;
 use p3_security::deep::lagrange_coset_rbr_degree_report;
 use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher};
-use p3_uni_stark::{StarkConfig, StarkGenericConfig, prove, verify};
+use p3_uni_stark::{
+    AirLayout, StarkConfig, StarkGenericConfig, get_constraint_layout, prove, verify,
+};
 use rand::SeedableRng;
 use rand::rngs::{SmallRng, StdRng, SysRng};
 #[cfg(target_family = "unix")]
@@ -161,6 +165,43 @@ fn main() -> Result<(), impl Debug> {
         rbr_degree_report.corrected_mapping_sufficient,
         rbr_degree_report.arbitrary_candidate_balance_assumed,
         rbr_degree_report.full_rbr_transfer_established,
+    );
+
+    // `uni-stark` symbolically evaluates this AIR over the base field, then
+    // lifts the discovered global layout into the challenge field when it
+    // decomposes alpha. Recompute that exact layout rather than inventing a
+    // second constraint count for the assurance record.
+    let constraint_layout =
+        get_constraint_layout::<Val, Val, _>(&air, AirLayout::from_air::<Val>(&air));
+    let mut global_indices = constraint_layout.base_indices.clone();
+    global_indices.extend_from_slice(&constraint_layout.ext_indices);
+    global_indices.sort_unstable();
+    assert_eq!(
+        global_indices,
+        (0..constraint_layout.total_constraints()).collect::<Vec<_>>(),
+        "the symbolic base/extension split must preserve every global constraint index exactly once"
+    );
+    let combination_report = single_alpha_constraint_combination_report(
+        constraint_layout.total_constraints(),
+        Challenge::order(),
+    )
+    .expect("the concrete AIR constraint layout must admit an exact root-count report");
+    println!(
+        "P3_FRI_RBR_CONSTRAINT_COMBINATION_RUNTIME_V0 proof_verified=true num_constraints={} lowest_alpha_power={} highest_alpha_power={} schwartz_zippel_degree_bound={} challenge_field_cardinality={} per_candidate_error_numerator={} historical_calculator_numerator={} historical_calculator_factor_is_conservative={} independent_coefficients_assumed={} nonzero_coefficient_polynomial_required={} source_list_size_binding_established={} state_function_correspondence_established={} fiat_shamir_uniformity_established={} full_rbr_transfer_established={}",
+        combination_report.num_constraints,
+        combination_report.lowest_alpha_power,
+        combination_report.highest_alpha_power,
+        combination_report.schwartz_zippel_degree_bound,
+        combination_report.challenge_field_cardinality,
+        combination_report.per_candidate_error_numerator,
+        combination_report.historical_calculator_numerator,
+        combination_report.historical_calculator_factor_is_conservative,
+        combination_report.independent_coefficients_assumed,
+        combination_report.nonzero_coefficient_polynomial_required,
+        combination_report.source_list_size_binding_established,
+        combination_report.state_function_correspondence_established,
+        combination_report.fiat_shamir_uniformity_established,
+        combination_report.full_rbr_transfer_established,
     );
 
     let mask_degree_reports = config.pcs().mask_degree_reports();
