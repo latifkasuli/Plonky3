@@ -13,6 +13,133 @@
 
 use libm::{ceil, pow, sqrt};
 
+/// Exact source-parameter report for the list-decoding regime used by one
+/// concrete FRI analysis.
+///
+/// This deliberately stops short of claiming that the source RbR state
+/// function matches the implementation's acceptance predicate. In the ZK
+/// profile, the source candidate-degree envelope is `2 * |H|`, whereas the
+/// base Reed--Solomon code used to define `rho` has dimension `|H|`.
+/// Establishing the reduction between those candidate families is separate
+/// mathematical work.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct LdrListParameterReport {
+    pub trace_domain_size: usize,
+    pub evaluation_domain_size: usize,
+    pub log_blowup: usize,
+    pub base_rs_dimension: usize,
+    pub base_rs_rate_numerator: usize,
+    pub base_rs_rate_denominator: usize,
+    pub sqrt_rate_reciprocal: usize,
+    pub proximity_m: usize,
+    pub proximity_radius_numerator: usize,
+    pub proximity_radius_denominator: usize,
+    pub source_list_size_bound: usize,
+    pub source_hiding_beta: usize,
+    pub source_candidate_degree_bound: usize,
+    pub source_expanded_candidate_degree_bound: usize,
+    pub eta_comparison_left: usize,
+    pub eta_comparison_right: usize,
+    pub eta_positive: bool,
+    pub analysis_m_selected_by_ldt_only: bool,
+    pub full_composite_optimality_established: bool,
+    pub base_rs_parameters_established: bool,
+    pub source_list_formula_instantiated: bool,
+    pub state_candidate_family_correspondence_established: bool,
+    pub common_rs_and_list_size_regime_established: bool,
+}
+
+/// Instantiate the exact Johnson/list-size parameters for the concrete
+/// power-of-four FRI rate while retaining the ZK candidate-family gap.
+///
+/// For `rho = 1 / 2^log_blowup` with even `log_blowup`, this computes
+///
+/// - `theta = 1 - (1 + 1/(2m)) * sqrt(rho)`, and
+/// - `ell_m = (m + 1/2) / sqrt(rho)`.
+///
+/// It also checks the source `eta > 0` comparison against the separately
+/// established hiding envelope `k = 2|H|`, `k+ = k + 2`. The selected `m`
+/// is explicitly labeled as an LDT-only analysis choice: it is not a field
+/// carried by the proof and this function does not establish the source state
+/// function or a full RbR theorem.
+pub fn exact_ldr_list_parameter_report(
+    trace_domain_size: usize,
+    evaluation_domain_size: usize,
+    log_blowup: usize,
+    proximity_m: usize,
+    source_candidate_degree_bound: usize,
+    source_expanded_candidate_degree_bound: usize,
+) -> Option<LdrListParameterReport> {
+    if trace_domain_size == 0
+        || !trace_domain_size.is_power_of_two()
+        || log_blowup == 0
+        || !log_blowup.is_multiple_of(2)
+        || proximity_m < 3
+    {
+        return None;
+    }
+    let blowup = 1usize.checked_shl(log_blowup as u32)?;
+    let expected_evaluation_domain_size = trace_domain_size.checked_mul(blowup)?;
+    if evaluation_domain_size != expected_evaluation_domain_size {
+        return None;
+    }
+    let sqrt_rate_reciprocal = 1usize.checked_shl((log_blowup / 2) as u32)?;
+    let expected_source_candidate_degree_bound = trace_domain_size.checked_mul(2)?;
+    if source_candidate_degree_bound != expected_source_candidate_degree_bound
+        || source_expanded_candidate_degree_bound != source_candidate_degree_bound.checked_add(2)?
+    {
+        return None;
+    }
+
+    let two_m = proximity_m.checked_mul(2)?;
+    let two_m_plus_one = two_m.checked_add(1)?;
+    let proximity_radius_denominator = two_m.checked_mul(sqrt_rate_reciprocal)?;
+    let proximity_radius_numerator = proximity_radius_denominator.checked_sub(two_m_plus_one)?;
+    if proximity_radius_numerator == 0 {
+        return None;
+    }
+    let list_size_numerator = two_m_plus_one.checked_mul(sqrt_rate_reciprocal)?;
+    if !list_size_numerator.is_multiple_of(2) {
+        return None;
+    }
+    let source_list_size_bound = list_size_numerator / 2;
+
+    // Compare alpha = (2m+1)/(2m*sqrt(1/rho)) with k+/|D| exactly.
+    let eta_comparison_left = two_m_plus_one.checked_mul(evaluation_domain_size)?;
+    let eta_comparison_right =
+        source_expanded_candidate_degree_bound.checked_mul(proximity_radius_denominator)?;
+    let eta_positive = eta_comparison_left > eta_comparison_right;
+    if !eta_positive {
+        return None;
+    }
+
+    Some(LdrListParameterReport {
+        trace_domain_size,
+        evaluation_domain_size,
+        log_blowup,
+        base_rs_dimension: trace_domain_size,
+        base_rs_rate_numerator: 1,
+        base_rs_rate_denominator: blowup,
+        sqrt_rate_reciprocal,
+        proximity_m,
+        proximity_radius_numerator,
+        proximity_radius_denominator,
+        source_list_size_bound,
+        source_hiding_beta: 2,
+        source_candidate_degree_bound,
+        source_expanded_candidate_degree_bound,
+        eta_comparison_left,
+        eta_comparison_right,
+        eta_positive,
+        analysis_m_selected_by_ldt_only: true,
+        full_composite_optimality_established: false,
+        base_rs_parameters_established: true,
+        source_list_formula_instantiated: true,
+        state_candidate_family_correspondence_established: false,
+        common_rs_and_list_size_regime_established: false,
+    })
+}
+
 /// Performance cap on the proximity parameter `m` searched in LDR
 /// analyses. Matches Ethereum's `soundcalc`.
 pub const LDR_M_CAP: usize = 1000;
@@ -65,4 +192,39 @@ pub fn compute_upper_m(trace_length: usize) -> usize {
     let h = trace_length as f64;
     let ratio = (h + 2.0) / h;
     ceil(1.0 / (2.0 * (sqrt(ratio) - 1.0))) as usize
+}
+
+#[cfg(test)]
+mod exact_list_parameter_tests {
+    use super::*;
+
+    #[test]
+    fn concrete_rate_quarter_parameters_are_exact_and_state_scoped() {
+        let report =
+            exact_ldr_list_parameter_report(1 << 16, 1 << 18, 2, 3, 1 << 17, (1 << 17) + 2)
+                .unwrap();
+
+        assert_eq!(report.base_rs_rate_numerator, 1);
+        assert_eq!(report.base_rs_rate_denominator, 4);
+        assert_eq!(report.proximity_radius_numerator, 5);
+        assert_eq!(report.proximity_radius_denominator, 12);
+        assert_eq!(report.source_list_size_bound, 7);
+        assert!(report.eta_positive);
+        assert!(report.base_rs_parameters_established);
+        assert!(report.source_list_formula_instantiated);
+        assert!(!report.state_candidate_family_correspondence_established);
+        assert!(!report.common_rs_and_list_size_regime_established);
+    }
+
+    #[test]
+    fn rejects_wrong_domain_or_hiding_degree_envelope() {
+        assert!(
+            exact_ldr_list_parameter_report(1 << 16, 1 << 17, 2, 100, 1 << 17, (1 << 17) + 2,)
+                .is_none()
+        );
+        assert!(
+            exact_ldr_list_parameter_report(1 << 16, 1 << 18, 2, 100, 1 << 16, (1 << 16) + 2,)
+                .is_none()
+        );
+    }
 }

@@ -14,6 +14,9 @@ use p3_merkle_tree::MerkleTreeHidingMmcs;
 use p3_poseidon2_air::{RoundConstants, VectorizedPoseidon2Air};
 use p3_security::air::single_alpha_constraint_combination_report;
 use p3_security::deep::lagrange_coset_rbr_degree_report;
+use p3_security::fri::best_ldr_m;
+use p3_security::proximity::exact_ldr_list_parameter_report;
+use p3_security::{InstanceShape, StarkAirParams};
 use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher};
 use p3_uni_stark::{
     AirLayout, StarkConfig, StarkGenericConfig, get_constraint_layout, prove, verify,
@@ -103,6 +106,7 @@ fn main() -> Result<(), impl Debug> {
     > = VectorizedPoseidon2Air::new(constants);
 
     let fri_params = FriParameters::new_benchmark_zk(challenge_mmcs);
+    let fri_security_regime = fri_params.security_regime();
 
     let trace = air.generate_vectorized_trace_rows(NUM_PERMUTATIONS, fri_params.log_blowup);
 
@@ -205,6 +209,52 @@ fn main() -> Result<(), impl Debug> {
         combination_report.state_function_correspondence_established,
         combination_report.fiat_shamir_uniformity_established,
         combination_report.full_rbr_transfer_established,
+    );
+
+    let air_params =
+        StarkAirParams::from_air::<Val, Val, _>(&air, AirLayout::from_air::<Val>(&air), 2);
+    let instance_shape = InstanceShape {
+        log_trace_length: NUM_ROWS.ilog2() as usize,
+        modulus_bits: Challenge::order().bits() as usize,
+        collision_resistance: 128,
+        num_batched_functions: 1,
+    };
+    let (analysis_m, _) = best_ldr_m(&fri_security_regime, &air_params, &instance_shape)
+        .expect("the concrete FRI shape must admit an LDR analysis parameter");
+    let list_parameter_report = exact_ldr_list_parameter_report(
+        NUM_ROWS,
+        NUM_ROWS << fri_security_regime.log_blowup,
+        fri_security_regime.log_blowup,
+        analysis_m,
+        rbr_degree_report.source_low_degree_bound_k,
+        rbr_degree_report.source_expanded_low_degree_bound_k_plus,
+    )
+    .expect("the concrete FRI shape must satisfy the exact list-parameter checks");
+    println!(
+        "P3_FRI_RBR_LIST_PARAMETERS_RUNTIME_V0 proof_verified=true trace_domain_size={} evaluation_domain_size={} log_blowup={} base_rs_dimension={} base_rs_rate_numerator={} base_rs_rate_denominator={} sqrt_rate_reciprocal={} proximity_m={} proximity_radius_numerator={} proximity_radius_denominator={} source_list_size_bound={} source_hiding_beta={} source_candidate_degree_bound={} source_expanded_candidate_degree_bound={} eta_comparison_left={} eta_comparison_right={} eta_positive={} analysis_m_selected_by_ldt_only={} full_composite_optimality_established={} base_rs_parameters_established={} source_list_formula_instantiated={} state_candidate_family_correspondence_established={} common_rs_and_list_size_regime_established={}",
+        list_parameter_report.trace_domain_size,
+        list_parameter_report.evaluation_domain_size,
+        list_parameter_report.log_blowup,
+        list_parameter_report.base_rs_dimension,
+        list_parameter_report.base_rs_rate_numerator,
+        list_parameter_report.base_rs_rate_denominator,
+        list_parameter_report.sqrt_rate_reciprocal,
+        list_parameter_report.proximity_m,
+        list_parameter_report.proximity_radius_numerator,
+        list_parameter_report.proximity_radius_denominator,
+        list_parameter_report.source_list_size_bound,
+        list_parameter_report.source_hiding_beta,
+        list_parameter_report.source_candidate_degree_bound,
+        list_parameter_report.source_expanded_candidate_degree_bound,
+        list_parameter_report.eta_comparison_left,
+        list_parameter_report.eta_comparison_right,
+        list_parameter_report.eta_positive,
+        list_parameter_report.analysis_m_selected_by_ldt_only,
+        list_parameter_report.full_composite_optimality_established,
+        list_parameter_report.base_rs_parameters_established,
+        list_parameter_report.source_list_formula_instantiated,
+        list_parameter_report.state_candidate_family_correspondence_established,
+        list_parameter_report.common_rs_and_list_size_regime_established,
     );
 
     let mask_degree_reports = config.pcs().mask_degree_reports();
