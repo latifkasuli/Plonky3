@@ -29,6 +29,7 @@ pub struct HidingFriPcs<Val, Dft, InputMmcs, FriMmcs, R: CryptoRng> {
     rng: Mutex<R>,
     quotient_degree_reports: Mutex<Vec<LagrangeQuotientHidingDegreeReport>>,
     mask_degree_reports: Mutex<Vec<FriMaskPolynomialDegreeReport>>,
+    rbr_execution_shape_reports: Mutex<Vec<FriRbrExecutionShapeReport>>,
 }
 
 /// Check the Lagrange-quotient hiding capacity from ePrint 2024/1037,
@@ -101,6 +102,29 @@ pub struct FriMaskPolynomialDegreeReport {
     pub source_mask_degree_bound_exclusive: usize,
     pub implemented_reduced_mask_degree_bound_exclusive: usize,
     pub source_reduced_mask_degree_bound_exclusive: usize,
+}
+
+/// Shape of the actual opening batch and FRI reduction schedule emitted by
+/// one hiding-PCS proof.
+///
+/// This is configuration identity evidence.  It does not establish the RbR
+/// theorem, verifier-challenge uniformity, commitment binding, or zero
+/// knowledge; `p3-security` performs the source theorem checks separately.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FriRbrExecutionShapeReport {
+    pub input_batch_count: usize,
+    pub input_matrix_count: usize,
+    pub input_matrix_widths: Vec<usize>,
+    pub input_matrix_opening_point_counts: Vec<usize>,
+    pub opening_batch_function_count: usize,
+    pub all_input_matrices_share_one_height: bool,
+    pub fri_input_height: usize,
+    pub fri_input_degree_bound: usize,
+    pub fri_log_blowup: usize,
+    pub fri_max_log_arity: usize,
+    pub fri_log_arities: Vec<usize>,
+    pub fri_final_domain_size: usize,
+    pub num_queries: usize,
 }
 
 pub fn fri_mask_polynomial_degree_report(
@@ -176,6 +200,9 @@ where
             rng: Mutex::new(R::from_rng(&mut *self.rng.lock())),
             quotient_degree_reports: Mutex::new(self.quotient_degree_reports.lock().clone()),
             mask_degree_reports: Mutex::new(self.mask_degree_reports.lock().clone()),
+            rbr_execution_shape_reports: Mutex::new(
+                self.rbr_execution_shape_reports.lock().clone(),
+            ),
         }
     }
 }
@@ -195,6 +222,7 @@ impl<Val, Dft, InputMmcs, FriMmcs, R: CryptoRng> HidingFriPcs<Val, Dft, InputMmc
             rng: Mutex::new(rng),
             quotient_degree_reports: Mutex::new(Vec::new()),
             mask_degree_reports: Mutex::new(Vec::new()),
+            rbr_execution_shape_reports: Mutex::new(Vec::new()),
         }
     }
 
@@ -212,6 +240,12 @@ impl<Val, Dft, InputMmcs, FriMmcs, R: CryptoRng> HidingFriPcs<Val, Dft, InputMmc
     /// not a simulator proof and does not establish ideal randomness or ZK.
     pub fn mask_degree_reports(&self) -> Vec<FriMaskPolynomialDegreeReport> {
         self.mask_degree_reports.lock().clone()
+    }
+
+    /// Return the exact opening-batch and fold-schedule reports recorded by
+    /// completed proof executions.
+    pub fn rbr_execution_shape_reports(&self) -> Vec<FriRbrExecutionShapeReport> {
+        self.rbr_execution_shape_reports.lock().clone()
     }
 }
 
@@ -546,6 +580,41 @@ where
             }
         }
 
+        let input_batch_count = rounds.len();
+        let mut input_matrix_count = 0usize;
+        let mut input_matrix_widths = Vec::new();
+        let mut input_matrix_opening_point_counts = Vec::new();
+        let mut opening_batch_function_count = 0usize;
+        let mut common_input_height = None;
+        let mut all_input_matrices_share_one_height = true;
+        for (data, points_by_matrix) in &rounds {
+            let matrices = self.inner.mmcs.get_matrices(data);
+            assert_eq!(
+                matrices.len(),
+                points_by_matrix.len(),
+                "each committed matrix must have one opening-point list"
+            );
+            input_matrix_count = input_matrix_count
+                .checked_add(matrices.len())
+                .expect("RbR input matrix count must fit usize");
+            for (matrix, points) in matrices.iter().zip(points_by_matrix) {
+                input_matrix_widths.push(matrix.width());
+                input_matrix_opening_point_counts.push(points.len());
+                let contribution = matrix
+                    .width()
+                    .checked_mul(points.len())
+                    .expect("RbR opening batch function count must fit usize");
+                opening_batch_function_count = opening_batch_function_count
+                    .checked_add(contribution)
+                    .expect("RbR opening batch function count must fit usize");
+                if let Some(height) = common_input_height {
+                    all_input_matrices_share_one_height &= height == matrix.height();
+                } else {
+                    common_input_height = Some(matrix.height());
+                }
+            }
+        }
+
         let lde_log = self
             .inner
             .fri
@@ -579,6 +648,35 @@ where
         let (mut inner_opened_values, inner_proof) =
             self.inner
                 .open_with_preprocessing(rounds, challenger, is_preprocessing);
+        let fri_input_height = common_input_height.expect("at least one FRI input matrix");
+        let fri_input_degree_bound = fri_input_height >> self.inner.fri.log_blowup;
+        let fri_log_arities = inner_proof
+            .commit_phase_openings
+            .iter()
+            .map(|opening| opening.log_arity as usize)
+            .collect();
+        self.rbr_execution_shape_reports
+            .lock()
+            .push(FriRbrExecutionShapeReport {
+                input_batch_count,
+                input_matrix_count,
+                input_matrix_widths,
+                input_matrix_opening_point_counts,
+                opening_batch_function_count,
+                all_input_matrices_share_one_height,
+                fri_input_height,
+                fri_input_degree_bound,
+                fri_log_blowup: self.inner.fri.log_blowup,
+                fri_max_log_arity: self.inner.fri.max_log_arity,
+                fri_log_arities,
+                fri_final_domain_size: self
+                    .inner
+                    .fri
+                    .blowup()
+                    .checked_mul(self.inner.fri.final_poly_len())
+                    .expect("FRI final domain size must fit usize"),
+                num_queries: self.inner.fri.num_queries,
+            });
         // inner_opened_values includes opened values for the random codewords. Those should be
         // hidden from our caller, so we split them off and store them in the proof.
         let opened_values_rand = inner_opened_values

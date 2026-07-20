@@ -9,7 +9,7 @@ use p3_fri::TwoAdicFriPcs;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-use p3_uni_stark::{StarkConfig, prove, verify};
+use p3_uni_stark::{StarkConfig, prove, verify, verify_with_expected_base_degree_bits};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 
@@ -94,6 +94,19 @@ fn test_no_next_row_air() {
     );
 
     verify(&config, &SquareAir, &proof, &[]).expect("verification should succeed");
+}
+
+#[test]
+fn expected_base_degree_is_bound_before_verification() {
+    let config = make_config();
+    let trace = generate_square_trace::<Val>(1 << 3);
+    let proof = prove(&config, &SquareAir, trace, &[]);
+
+    verify_with_expected_base_degree_bits(&config, &SquareAir, &proof, &[], 3)
+        .expect("the exact base degree should verify");
+    let error = verify_with_expected_base_degree_bits(&config, &SquareAir, &proof, &[], 2)
+        .expect_err("a different expected base degree must fail closed");
+    assert!(error.to_string().contains("proof degree mismatch"));
 }
 
 #[test]

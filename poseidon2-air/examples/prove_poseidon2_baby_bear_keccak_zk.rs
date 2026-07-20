@@ -16,10 +16,12 @@ use p3_security::air::single_alpha_constraint_combination_report;
 use p3_security::deep::lagrange_coset_rbr_degree_report;
 use p3_security::fri::best_ldr_m;
 use p3_security::proximity::{exact_hiding_rbr_state_list_report, exact_ldr_list_parameter_report};
+use p3_security::rbr::{FriRbrFailureEvent, exact_fri_rbr_state_transition_report};
 use p3_security::{InstanceShape, StarkAirParams};
 use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher};
 use p3_uni_stark::{
-    AirLayout, StarkConfig, StarkGenericConfig, get_constraint_layout, prove, verify,
+    AirLayout, StarkConfig, StarkGenericConfig, get_constraint_layout, prove,
+    verify_with_expected_base_degree_bits,
 };
 use rand::SeedableRng;
 use rand::rngs::{SmallRng, StdRng, SysRng};
@@ -122,7 +124,8 @@ fn main() -> Result<(), impl Debug> {
 
     let proof = prove(&config, &air, trace, &[]);
 
-    verify(&config, &air, &proof, &[]).expect("the concrete ZK proof must verify");
+    verify_with_expected_base_degree_bits(&config, &air, &proof, &[], NUM_ROWS.ilog2() as usize)
+        .expect("the concrete ZK proof must verify at the fixed base trace degree");
 
     let degree_reports = config.pcs().quotient_degree_reports();
     assert_eq!(
@@ -323,6 +326,127 @@ fn main() -> Result<(), impl Debug> {
         hiding_state_list_report.fiat_shamir_uniformity_established,
         hiding_state_list_report.full_rbr_transfer_established,
         hiding_state_list_report.zero_knowledge_established,
+    );
+
+    let execution_shape_reports = config.pcs().rbr_execution_shape_reports();
+    assert_eq!(
+        execution_shape_reports.len(),
+        1,
+        "the concrete example must execute exactly one hiding FRI opening batch"
+    );
+    let execution_shape = &execution_shape_reports[0];
+    assert!(
+        execution_shape.all_input_matrices_share_one_height,
+        "the registered RbR profile requires one common hiding RS family"
+    );
+    let rbr_report = exact_fri_rbr_state_transition_report(
+        NUM_ROWS,
+        hiding_state_list_report.source_candidate_degree_bound,
+        hiding_state_list_report.fri_evaluation_domain_size,
+        NUM_ROWS,
+        hiding_state_list_report
+            .fri_evaluation_domain_size
+            .checked_add(NUM_ROWS)
+            .expect("the disjoint evaluation/trace union must fit usize"),
+        hiding_state_list_report.source_expanded_candidate_degree_bound,
+        rbr_degree_report.source_quotient_segment_count_f,
+        rbr_degree_report.source_quotient_segment_length_ell,
+        air_params.max_constraint_degree,
+        hiding_state_list_report.source_list_size_integer_bound,
+        combination_report.num_constraints,
+        Challenge::order(),
+        execution_shape.input_batch_count,
+        execution_shape.input_matrix_count,
+        &execution_shape.input_matrix_widths,
+        &execution_shape.input_matrix_opening_point_counts,
+        execution_shape.opening_batch_function_count,
+        execution_shape.all_input_matrices_share_one_height,
+        execution_shape.fri_input_height,
+        execution_shape.fri_input_degree_bound,
+        execution_shape.fri_log_blowup,
+        execution_shape.fri_max_log_arity,
+        &execution_shape.fri_log_arities,
+        execution_shape.fri_final_domain_size,
+        execution_shape.num_queries,
+        true,
+    )
+    .expect("the exact ideal-IOP RbR state and failure-event ledger must validate");
+    let maximum_failure_event = match rbr_report.maximum_failure_event {
+        FriRbrFailureEvent::ConstraintCombination => "constraint_combination",
+        FriRbrFailureEvent::DeepEvaluation => "deep_evaluation",
+        FriRbrFailureEvent::OpeningBatchCombination => "opening_batch_combination",
+        FriRbrFailureEvent::FriCommitRound(_) => "fri_commit_round",
+        FriRbrFailureEvent::FriQueries => "fri_queries",
+    };
+    let fri_log_arities = rbr_report
+        .fri_log_arities
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let fri_commit_error_numerators = rbr_report
+        .fri_commit_round_errors
+        .iter()
+        .map(|error| error.numerator.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let input_matrix_widths = rbr_report
+        .input_matrix_widths
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let input_matrix_opening_point_counts = rbr_report
+        .input_matrix_opening_point_counts
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    println!(
+        "P3_FRI_RBR_STATE_TRANSITION_RUNTIME_V0 proof_verified=true verifier_base_degree_bits_bound=true trace_domain_size={} source_candidate_degree_bound={} fri_evaluation_domain_size={} verifier_rejected_trace_domain_size={} evaluation_trace_domain_union_size={} source_list_size_integer_bound={} constraint_count={} input_batch_count={} input_matrix_count={} input_matrix_widths={} input_matrix_opening_point_counts={} opening_batch_function_count={} opening_batch_curve_degree={} fri_input_height={} fri_input_degree_bound={} fri_log_blowup={} fri_max_log_arity={} fri_log_arities={} fri_commit_round_count={} fri_final_domain_size={} num_queries={} source_printed_round_count={} proof_consistent_round_count={} failure_event_count={} source_round_count_indexing_discrepancy={} source_round_count_interpretation_author_confirmed={} source_error_vector_reused_verbatim={} source_state_ledger_adapted_with_bchks25_bounds={} constraint_combination_error_numerator={} deep_evaluation_error_numerator={} opening_batch_error_numerator={} fri_commit_error_numerators={} common_field_denominator={} fri_query_error_numerator={} fri_query_error_denominator={} maximum_failure_event={} ideal_iop_rbr_error_numerator={} ideal_iop_rbr_error_denominator={} complete_failure_event_ledger_established={} proof_consistent_ideal_iop_rbr_correspondence_established={} fiat_shamir_rom_uniformity_established={} commitment_binding_established={} zero_knowledge_established={}",
+        rbr_report.trace_domain_size,
+        rbr_report.source_candidate_degree_bound,
+        rbr_report.fri_evaluation_domain_size,
+        rbr_report.verifier_rejected_trace_domain_size,
+        rbr_report.evaluation_trace_domain_union_size,
+        rbr_report.source_list_size_integer_bound,
+        rbr_report.constraint_count,
+        execution_shape.input_batch_count,
+        execution_shape.input_matrix_count,
+        input_matrix_widths,
+        input_matrix_opening_point_counts,
+        rbr_report.opening_batch_function_count,
+        rbr_report.opening_batch_curve_degree,
+        execution_shape.fri_input_height,
+        execution_shape.fri_input_degree_bound,
+        execution_shape.fri_log_blowup,
+        execution_shape.fri_max_log_arity,
+        fri_log_arities,
+        rbr_report.fri_commit_round_count,
+        execution_shape.fri_final_domain_size,
+        rbr_report.num_queries,
+        rbr_report.source_printed_round_count,
+        rbr_report.proof_consistent_round_count,
+        rbr_report.failure_event_count,
+        rbr_report.source_round_count_indexing_discrepancy,
+        rbr_report.source_round_count_interpretation_author_confirmed,
+        rbr_report.source_error_vector_reused_verbatim,
+        rbr_report.source_state_ledger_adapted_with_bchks25_bounds,
+        rbr_report.constraint_combination_error.numerator,
+        rbr_report.deep_evaluation_error.numerator,
+        rbr_report.opening_batch_error.numerator,
+        fri_commit_error_numerators,
+        rbr_report.constraint_combination_error.denominator,
+        rbr_report.fri_query_error.numerator,
+        rbr_report.fri_query_error.denominator,
+        maximum_failure_event,
+        rbr_report.ideal_iop_rbr_error.numerator,
+        rbr_report.ideal_iop_rbr_error.denominator,
+        rbr_report.complete_failure_event_ledger_established,
+        rbr_report.proof_consistent_ideal_iop_rbr_correspondence_established,
+        rbr_report.fiat_shamir_rom_uniformity_established,
+        rbr_report.commitment_binding_established,
+        rbr_report.zero_knowledge_established,
     );
 
     Ok::<(), &'static str>(())

@@ -48,6 +48,7 @@ pub mod grinding;
 pub mod ldt;
 
 pub mod fri;
+pub mod rbr;
 pub mod whir;
 
 pub mod stark;

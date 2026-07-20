@@ -87,6 +87,16 @@ pub enum InvalidProofShapeError {
         maximum: usize,
         got: usize,
     },
+    /// The caller fixed a concrete base trace size, but the proof carries a
+    /// different (possibly ZK-extended) degree.
+    #[error(
+        "proof degree mismatch: expected base degree_bits={expected_base} (proof degree_bits={expected_proof}), got proof degree_bits={got}"
+    )]
+    ExpectedDegreeMismatch {
+        expected_base: usize,
+        expected_proof: usize,
+        got: usize,
+    },
     /// The quotient domain log-size overflows after adding degree bits and quotient chunk bits.
     #[error(
         "{}quotient domain too large: log-size {got} exceeds maximum {maximum}",

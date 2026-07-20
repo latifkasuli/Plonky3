@@ -272,6 +272,44 @@ where
     verify_with_preprocessed(config, air, proof, public_values, None)
 }
 
+/// Verify while binding the proof-carried degree to one expected base trace
+/// size.
+///
+/// The ordinary [`verify`] API accepts any structurally valid `degree_bits`
+/// carried by the proof.  Security calculations for a concrete instance must
+/// not silently reuse the parameters of one honest proof for an adversarial
+/// proof with a different trace size.  This wrapper performs that application
+/// binding before any transcript work and then delegates to the normal
+/// verifier.
+pub fn verify_with_expected_base_degree_bits<SC, A>(
+    config: &SC,
+    air: &A,
+    proof: &Proof<SC>,
+    public_values: &[Val<SC>],
+    expected_base_degree_bits: usize,
+) -> Result<(), VerificationError<PcsError<SC>>>
+where
+    SC: StarkGenericConfig,
+    A: Air<SymbolicAirBuilder<Val<SC>>> + for<'a> Air<VerifierConstraintFolder<'a, SC>>,
+{
+    let expected_proof_degree_bits = expected_base_degree_bits
+        .checked_add(config.is_zk())
+        .ok_or(InvalidProofShapeError::DegreeBitsTooLarge {
+            air: None,
+            maximum: usize::MAX - config.is_zk(),
+            got: expected_base_degree_bits,
+        })?;
+    if proof.degree_bits != expected_proof_degree_bits {
+        return Err(InvalidProofShapeError::ExpectedDegreeMismatch {
+            expected_base: expected_base_degree_bits,
+            expected_proof: expected_proof_degree_bits,
+            got: proof.degree_bits,
+        }
+        .into());
+    }
+    verify(config, air, proof, public_values)
+}
+
 #[instrument(skip_all)]
 pub fn verify_with_preprocessed<SC, A>(
     config: &SC,
