@@ -403,9 +403,13 @@ fn main() -> Result<(), impl Debug> {
         .collect::<Vec<_>>()
         .join(",");
     println!(
-        "P3_FRI_RBR_STATE_TRANSITION_RUNTIME_V0 proof_verified=true verifier_base_degree_bits_bound=true trace_domain_size={} source_candidate_degree_bound={} fri_evaluation_domain_size={} verifier_rejected_trace_domain_size={} evaluation_trace_domain_union_size={} source_list_size_integer_bound={} constraint_count={} input_batch_count={} input_matrix_count={} input_matrix_widths={} input_matrix_opening_point_counts={} opening_batch_function_count={} opening_batch_curve_degree={} fri_input_height={} fri_input_degree_bound={} fri_log_blowup={} fri_max_log_arity={} fri_log_arities={} fri_commit_round_count={} fri_final_domain_size={} num_queries={} source_printed_round_count={} proof_consistent_round_count={} failure_event_count={} source_round_count_indexing_discrepancy={} source_round_count_interpretation_author_confirmed={} source_error_vector_reused_verbatim={} source_state_ledger_adapted_with_bchks25_bounds={} constraint_combination_error_numerator={} deep_evaluation_error_numerator={} opening_batch_error_numerator={} fri_commit_error_numerators={} common_field_denominator={} fri_query_error_numerator={} fri_query_error_denominator={} maximum_failure_event={} ideal_iop_rbr_error_numerator={} ideal_iop_rbr_error_denominator={} complete_failure_event_ledger_established={} proof_consistent_ideal_iop_rbr_correspondence_established={} fiat_shamir_rom_uniformity_established={} commitment_binding_established={} zero_knowledge_established={}",
+        "P3_FRI_RBR_STATE_TRANSITION_RUNTIME_V0 proof_verified=true verifier_base_degree_bits_bound=true trace_domain_size={} source_candidate_degree_bound={} source_expanded_candidate_degree_bound={} source_quotient_segment_count={} source_quotient_segment_length={} max_constraint_degree={} fri_evaluation_domain_size={} verifier_rejected_trace_domain_size={} evaluation_trace_domain_union_size={} source_list_size_integer_bound={} constraint_count={} input_batch_count={} input_matrix_count={} input_matrix_widths={} input_matrix_opening_point_counts={} opening_batch_function_count={} opening_batch_curve_degree={} fri_input_height={} fri_input_degree_bound={} fri_log_blowup={} fri_max_log_arity={} fri_log_arities={} fri_commit_round_count={} fri_final_domain_size={} num_queries={} source_printed_round_count={} proof_consistent_round_count={} failure_event_count={} source_round_count_indexing_discrepancy={} source_round_count_interpretation_author_confirmed={} source_error_vector_reused_verbatim={} source_state_ledger_adapted_with_bchks25_bounds={} constraint_combination_error_numerator={} deep_first_degree_bound={} deep_second_degree_bound={} deep_max_degree_bound={} deep_list_factor={} deep_accepted_forbidden_size={} deep_evaluation_error_numerator={} opening_batch_error_numerator={} fri_commit_error_numerators={} common_field_denominator={} fri_query_error_numerator={} fri_query_error_denominator={} maximum_failure_event={} ideal_iop_rbr_error_numerator={} ideal_iop_rbr_error_denominator={} complete_failure_event_ledger_established={} proof_consistent_ideal_iop_rbr_correspondence_established={} fiat_shamir_rom_uniformity_established={} commitment_binding_established={} zero_knowledge_established={}",
         rbr_report.trace_domain_size,
         rbr_report.source_candidate_degree_bound,
+        rbr_report.source_expanded_candidate_degree_bound,
+        rbr_report.source_quotient_segment_count,
+        rbr_report.source_quotient_segment_length,
+        rbr_report.max_constraint_degree,
         rbr_report.fri_evaluation_domain_size,
         rbr_report.verifier_rejected_trace_domain_size,
         rbr_report.evaluation_trace_domain_union_size,
@@ -433,6 +437,11 @@ fn main() -> Result<(), impl Debug> {
         rbr_report.source_error_vector_reused_verbatim,
         rbr_report.source_state_ledger_adapted_with_bchks25_bounds,
         rbr_report.constraint_combination_error.numerator,
+        rbr_report.deep_first_degree_bound,
+        rbr_report.deep_second_degree_bound,
+        rbr_report.deep_max_degree_bound,
+        rbr_report.deep_list_factor,
+        rbr_report.deep_accepted_forbidden_size,
         rbr_report.deep_evaluation_error.numerator,
         rbr_report.opening_batch_error.numerator,
         fri_commit_error_numerators,

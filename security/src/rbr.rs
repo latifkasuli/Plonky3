@@ -57,6 +57,10 @@ pub enum FriRbrFailureEvent {
 pub struct FriRbrStateTransitionReport {
     pub trace_domain_size: usize,
     pub source_candidate_degree_bound: usize,
+    pub source_expanded_candidate_degree_bound: usize,
+    pub source_quotient_segment_count: usize,
+    pub source_quotient_segment_length: usize,
+    pub max_constraint_degree: usize,
     pub fri_evaluation_domain_size: usize,
     pub verifier_rejected_trace_domain_size: usize,
     pub evaluation_trace_domain_union_size: usize,
@@ -83,6 +87,11 @@ pub struct FriRbrStateTransitionReport {
     pub source_error_vector_reused_verbatim: bool,
     pub source_state_ledger_adapted_with_bchks25_bounds: bool,
     pub constraint_combination_error: ExactErrorFraction,
+    pub deep_first_degree_bound: usize,
+    pub deep_second_degree_bound: usize,
+    pub deep_max_degree_bound: usize,
+    pub deep_list_factor: usize,
+    pub deep_accepted_forbidden_size: usize,
     pub deep_evaluation_error: ExactErrorFraction,
     pub opening_batch_error: ExactErrorFraction,
     pub fri_commit_round_errors: Vec<ExactErrorFraction>,
@@ -311,6 +320,10 @@ pub fn exact_fri_rbr_state_transition_report(
     Some(FriRbrStateTransitionReport {
         trace_domain_size,
         source_candidate_degree_bound,
+        source_expanded_candidate_degree_bound,
+        source_quotient_segment_count: quotient_segment_count,
+        source_quotient_segment_length: quotient_segment_length,
+        max_constraint_degree,
         fri_evaluation_domain_size,
         verifier_rejected_trace_domain_size,
         evaluation_trace_domain_union_size,
@@ -337,6 +350,11 @@ pub fn exact_fri_rbr_state_transition_report(
         source_error_vector_reused_verbatim: false,
         source_state_ledger_adapted_with_bchks25_bounds: true,
         constraint_combination_error,
+        deep_first_degree_bound: first_deep_degree,
+        deep_second_degree_bound: second_deep_degree,
+        deep_max_degree_bound: deep_degree,
+        deep_list_factor,
+        deep_accepted_forbidden_size: accepted_forbidden,
         deep_evaluation_error,
         opening_batch_error,
         fri_commit_round_errors,
@@ -495,6 +513,15 @@ mod tests {
             report.deep_evaluation_error.numerator,
             BigUint::from(104_333_456usize)
         );
+        assert_eq!(report.source_expanded_candidate_degree_bound, 131_074);
+        assert_eq!(report.source_quotient_segment_count, 8);
+        assert_eq!(report.source_quotient_segment_length, 65_536);
+        assert_eq!(report.max_constraint_degree, 3);
+        assert_eq!(report.deep_first_degree_bound, 524_290);
+        assert_eq!(report.deep_second_degree_bound, 720_897);
+        assert_eq!(report.deep_max_degree_bound, 720_897);
+        assert_eq!(report.deep_list_factor, 144);
+        assert_eq!(report.deep_accepted_forbidden_size, 524_288);
         assert_eq!(report.opening_batch_curve_degree, 2459);
         assert_eq!(
             report.opening_batch_error.numerator,
